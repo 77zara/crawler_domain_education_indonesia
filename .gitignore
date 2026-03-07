@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Environment secrets
+.env
+
+# Crawl output data (large files)
+data/*.jsonl
+data/*.log
+
+# UV lock (optional — remove this line if you want reproducible builds)
+# uv.lock
+
+# OS
+Thumbs.db
+.DS_Store

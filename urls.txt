@@ -1,0 +1,63 @@
+# ===========================================================================
+# AITF SR-02 Crawler — Seed URLs
+# Tim 2 Sekolah Rakyat (AITF 2026)
+# ===========================================================================
+# Seed URLs — di-crawl pertama sebelum search engine mulai.
+# Fokus: sumber pemerintah, akademik, platform edukasi Indonesia.
+# ===========================================================================
+
+# --- Portal Pemerintah Pendidikan (.go.id) ---
+https://sekolahrakyat.kemensos.go.id
+https://buku.kemendikdasmen.go.id
+https://guru.kemendikdasmen.go.id
+https://rumah.pendidikan.go.id
+https://kurikulum.kemendikdasmen.go.id
+https://cerdasberkarakter.kemendikdasmen.go.id
+https://ayoguruberbagi.kemdikbud.go.id
+https://pusdatin.kemendikdasmen.go.id
+https://ppsdm.kemendikdasmen.go.id
+https://pusmendik.kemdikbud.go.id
+https://ppg.kemendikdasmen.go.id
+https://repositori.kemendikdasmen.go.id
+
+https://forum.pelatihan-osn.com/
+
+# --- Platform Edukasi Indonesia ---
+https://www.zenius.net/blog/materi
+https://www.ruangguru.com/blog/materi
+https://www.quipper.com/id/blog/materi
+
+# --- Wikipedia Indonesia (maks 3) ---
+https://id.wikipedia.org/wiki/sekolahrakyat
+https://id.wikipedia.org/wiki/Pendidikan_di_Indonesia
+https://id.wikipedia.org/wiki/Profil_Pelajar_Pancasila
+
+# --- Berita & Analisis Pendidikan ---
+https://www.detik.com/edu
+https://edukasi.kompas.com
+https://tirto.id/pendidikan
+https://kumparan.com/topic/pendidikan
+https://koranedukasi.id
+
+# --- Komunitas Guru & Blog Pendidikan ---
+https://gurusiana.id
+https://indonesiana.id
+https://gurusd.web.id
+https://operatorsekolah.com
+https://sekolahdasar.net
+https://ainamulyana.blogspot.com
+https://gurune.net
+https://kangmartho.com
+https://sejutaguru.com
+https://informasiguru.com
+https://wangsajaya.wordpress.com
+https://pak-anang.blogspot.com
+https://kangdidik.com
+https://saling-sapa.blogspot.com
+
+# --- Riset & Yayasan Pendidikan ---
+https://pintar.tanotofoundation.org
+https://inovasi.or.id
+https://pspk.id
+
+
