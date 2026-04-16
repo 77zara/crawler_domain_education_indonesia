@@ -70,13 +70,16 @@ Seed URLs yang akan di-crawl pertama kali, terbagi dalam kategori:
 pip install -r requirements.txt
 ```
 
-Dependencies baru yang ditambahkan:
-- `pymupdf4llm`: Untuk ekstraksi PDF jurnal
+Jika ingin crawling PDF jurnal, install dependency PDF (opsional):
+
+```bash
+pip install pymupdf4llm
+```
 
 ### 2. Crawling Website Umum
 
 ```bash
-python clean_crawler.py
+python src/cleaner/clean_crawler.py
 ```
 
 Output: `dataset_llm.jsonl`
@@ -84,7 +87,7 @@ Output: `dataset_llm.jsonl`
 ### 3. Crawling Jurnal Ilmiah (PDF)
 
 ```bash
-python pdf_crawler.py
+python pdf_crawl/pdf_crawler.py
 ```
 
 Output: `data/dataset_jurnal.jsonl`

@@ -10,6 +10,7 @@
 https://sekolahrakyat.kemensos.go.id
 https://buku.kemdikdasmen.go.id
 https://guru.kemdikdasmen.go.id
+https://pusatprestasinasional.kemendikdasmen.go.id/
 https://rumah.pendidikan.go.id
 https://kurikulum.kemdikdasmen.go.id
 https://cerdasberkarakter.kemdikdasmen.go.id
@@ -23,6 +24,7 @@ https://bskap.kemdikdasmen.go.id
 https://www.kemdiktisaintek.go.id
 https://dikti.kemdiktisaintek.go.id
 https://ristekbrin.go.id
+
 
 https://forum.pelatihan-osn.com/
 

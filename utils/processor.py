@@ -11,7 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from config import CLASSIFICATION_RULES, TARGET_KEYWORDS, MIN_RELEVANCE_KEYWORDS
+from config import (
+    CLASSIFICATION_RULES,
+    TARGET_KEYWORDS,
+    MIN_RELEVANCE_KEYWORDS,
+    SCIENCE_VOCAB_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,55 @@ def relevance_score(text: str, keywords: list[str] | None = None) -> int:
     keywords = keywords or TARGET_KEYWORDS
     text_lower = text.lower()
     return sum(1 for kw in keywords if kw.lower() in text_lower)
+
+
+def fuzzy_science_relevance(
+    text: str,
+    *,
+    threshold: int = 88,
+    min_hits: int = 1,
+    top_k: int = 5,
+    vocab: list[str] | None = None,
+) -> tuple[int, list[dict]]:
+    """Fuzzy relevance terhadap kosakata sains Indonesia.
+
+    Return (best_score, hits) dengan score 0..100.
+    Jika RapidFuzz tidak terpasang, return (0, []).
+    """
+    vocab = vocab or SCIENCE_VOCAB_ID
+
+    try:
+        from rapidfuzz import fuzz
+    except Exception:
+        return 0, []
+
+    sample = " ".join(text.lower().split())
+    if not sample:
+        return 0, []
+
+    # Batasi panjang supaya komputasi tetap ringan.
+    # partial_ratio cukup robust untuk keyword pendek.
+    sample = sample[:8000]
+
+    scored: list[dict] = []
+    for term in vocab:
+        t = term.lower()
+        if t and t in sample:
+            score = 100
+        else:
+            score = int(fuzz.partial_ratio(t, sample)) if t else 0
+
+        if score >= threshold:
+            scored.append({"term": term, "score": score})
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    hits = scored[:top_k]
+    best = hits[0]["score"] if hits else 0
+
+    if len(hits) < min_hits:
+        return best, hits
+
+    return best, hits
 
 
 # ---------------------------------------------------------------------------

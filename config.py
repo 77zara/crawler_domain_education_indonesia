@@ -48,9 +48,32 @@ class Settings(BaseSettings):
     HEADLESS: bool = True
     PAGE_TIMEOUT: int = 60000  # ms
 
+    # Instance / scaling (optional)
+    # Kosong = mode single-instance (output + dedupe di data/)
+    INSTANCE_ID: str = ""
+
     # Search engine discovery
     SEARCH_DELAY: float = 3.0  # detik antar search query (rate limiting)
     MIN_RELEVANCE_SCORE: int = 2  # minimal keyword match untuk simpan konten
+
+    # Lebih selektif untuk STEM/humaniora: gunakan frasa (>= 2 kata)
+    MIN_PHRASE_RELEVANCE_SCORE: int = 2
+
+    # Extraction quality gate (0..1)
+    MIN_EXTRACTION_QUALITY: float = 0.80
+
+    # Fuzzy science relevance (RapidFuzz, optional)
+    FUZZY_SCIENCE_THRESHOLD: int = 80  # 0..100, semakin tinggi semakin presisi
+    FUZZY_SCIENCE_MIN_HITS: int = 2
+
+    # Token counting (Qwen tokenizer via HuggingFace Transformers)
+    TOKENIZER_MODEL_ID: str = "Qwen/Qwen2.5-0.5B-Instruct"
+    TOKENIZER_TRUST_REMOTE_CODE: bool = False
+
+    # Discovery sharding (optional) — untuk multi-worker tanpa overlap besar
+    # Default: 1 shard (tidak di-shard)
+    DISCOVERY_SHARD_INDEX: int = 0
+    DISCOVERY_SHARD_COUNT: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -151,4 +174,140 @@ TARGET_KEYWORDS: list[str] = [
 # ---------------------------------------------------------------------------
 # Minimum Relevance — konten harus mengandung minimal N keyword untuk disimpan
 # ---------------------------------------------------------------------------
-MIN_RELEVANCE_KEYWORDS: int = 2
+MIN_RELEVANCE_KEYWORDS: int = 7
+
+# ---------------------------------------------------------------------------
+# Indonesian science + humaniora vocabulary (untuk fuzzy relevance)
+# Semua term di bawah minimal 2 kata (lebih selektif & lebih kontekstual)
+# ---------------------------------------------------------------------------
+SCIENCE_VOCAB_ID: list[str] = [
+    # --- Sains (fisika/kimia/biologi/matematika) ---
+    "materi sains",
+    "pelajaran ipa",
+    "ilmu pengetahuan alam",
+
+    "materi fisika",
+    "arus listrik",
+    "listrik statis",
+    "listrik dinamis",
+    "tegangan listrik",
+    "hambatan listrik",
+    "rangkaian listrik",
+    "medan magnet",
+
+    "konsep energi",
+    "konsep gaya",
+    "konsep gerak",
+    "konsep kecepatan",
+    "konsep percepatan",
+    "konsep massa",
+    "konsep gravitasi",
+    "konsep tekanan",
+    "konsep fluida",
+    "gelombang mekanik",
+    "frekuensi gelombang",
+    "amplitudo gelombang",
+    "optik geometri",
+    "cahaya tampak",
+    "lensa cembung",
+    "gelombang bunyi",
+    "energi termal",
+    "konsep suhu",
+    "energi kalor",
+    "konsep termodinamika",
+
+    "materi kimia",
+    "struktur atom",
+    "struktur molekul",
+    "unsur kimia",
+    "senyawa kimia",
+    "reaksi kimia",
+    "materi stoikiometri",
+    "asam basa",
+    "nilai ph",
+    "larutan kimia",
+    "ikatan kimia",
+    "tabel periodik",
+
+    "materi biologi",
+    "konsep genetika",
+    "molekul dna",
+    "struktur sel",
+    "sel hewan",
+    "sel tumbuhan",
+    "jaringan tubuh",
+    "organ tubuh",
+    "konsep ekologi",
+    "teori evolusi",
+    "mikroorganisme patogen",
+    "bakteri patogen",
+    "virus patogen",
+    "sistem pencernaan",
+    "sistem pernapasan",
+    "sistem peredaran darah",
+
+    "materi matematika",
+    "materi statistika",
+    "materi probabilitas",
+    "materi peluang",
+    "konsep aljabar",
+    "konsep geometri",
+    "konsep trigonometri",
+    "konsep kalkulus",
+    "konsep integral",
+    "konsep turunan",
+    "konsep limit",
+    "konsep logaritma",
+    "konsep eksponen",
+    "konsep persamaan",
+    "konsep fungsi",
+    "konsep vektor",
+    "konsep matriks",
+    "tabel data",
+    "grafik fungsi",
+    "diagram batang",
+
+    "metode eksperimen",
+    "metode percobaan",
+    "kegiatan praktikum",
+    "ruang laboratorium",
+    "metode ilmiah",
+    "uji hipotesis",
+    "hasil pengamatan",
+    "analisis data",
+
+    "olimpiade sains",
+    "osn sains",
+
+    # --- Humaniora (IPS/bahasa/seni) ---
+    "ilmu pengetahuan sosial",
+    "materi ips",
+
+    "ilmu ekonomi",
+    "materi ekonomi",
+    "konsep permintaan",
+    "konsep penawaran",
+
+    "ilmu sejarah",
+    "materi sejarah",
+    "sejarah indonesia",
+
+    "ilmu sosiologi",
+    "materi sosiologi",
+
+    "ilmu geografi",
+    "materi geografi",
+
+    "pendidikan kewarganegaraan",
+    "pendidikan pancasila",
+
+    "bahasa indonesia",
+    "bahasa inggris",
+    "kalimat efektif",
+    "struktur teks",
+    "teks eksplanasi",
+    "teks prosedur",
+    "analisis cerpen",
+
+    "seni budaya",
+]

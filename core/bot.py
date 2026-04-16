@@ -76,14 +76,17 @@ class TelegramController:
         # Set notify callback
         self.engine.set_notify_callback(self._send_message)
 
+        raw_name = self.engine.output_file.name
+        processed_1_name = getattr(self.engine, "output_processed_1_file", self.engine.output_file).name
+
         await update.message.reply_text(
             f"🚀 <b>Endless Crawling dimulai!</b>\n"
             f"   Mode: Search Engine Discovery + Spidering\n"
             f"   Workers: <b>{self.settings.MAX_CONCURRENCY}</b>\n"
             f"   Search delay: <b>{self.settings.SEARCH_DELAY}s</b>\n"
-            f"   Output:\n"
-            f"     • <code>data/dataset.jsonl</code> (raw markdown + metadata)\n"
-            f"     • <code>data/dataset_cpt.jsonl</code> (clean text for CPT)\n\n"
+            f"   Output (data/raw):\n"
+            f"     • <code>data/raw/{raw_name}</code> (raw crawl output)\n"
+            f"     • <code>data/raw/{processed_1_name}</code> (stage-1 processed text)\n\n"
             f"Crawler akan terus berjalan sampai /stop dikirim.",
             parse_mode="HTML",
         )
@@ -161,6 +164,7 @@ class TelegramController:
             f"❌ Gagal         : <b>{stats.urls_failed}</b>\n"
             f"⏭ Skipped       : <b>{stats.urls_skipped}</b>\n"
             f"🔗 Links found   : <b>{stats.links_extracted}</b>\n"
+            f"🧮 Tokens (Qwen) : <b>{getattr(stats, 'tokens_total', 0)}</b>\n"
             f"📋 Queue size    : <b>{self.engine.url_queue.qsize()}</b>\n"
             f"🗃 Visited total : <b>{len(self.engine.visited)}</b>\n"
             f"📁 Records saved : <b>{total_lines}</b>\n"

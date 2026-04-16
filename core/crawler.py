@@ -12,10 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import json
+import hashlib
 import logging
+import re
 import time
 from typing import Optional, Callable, Coroutine, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
+
+import aiosqlite
 
 from crawl4ai import (
     AsyncWebCrawler,
@@ -26,8 +31,17 @@ from crawl4ai import (
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.content_filter_strategy import PruningContentFilter
 
-from config import Settings
-from config import MIN_RELEVANCE_KEYWORDS
+try:
+    from trafilatura import extract as trafilatura_extract
+except Exception:  # pragma: no cover
+    trafilatura_extract = None
+
+try:
+    from bs4 import BeautifulSoup
+except Exception:  # pragma: no cover
+    BeautifulSoup = None
+
+from config import Settings, TARGET_KEYWORDS, SCIENCE_VOCAB_ID
 from utils.processor import (
     build_record,
     build_cpt_record,
@@ -37,6 +51,7 @@ from utils.processor import (
     extract_keywords_found,
     is_indonesian_text,
     relevance_score,
+    fuzzy_science_relevance,
 )
 from utils.discovery import (
     DiscoveryEngine,
@@ -59,6 +74,7 @@ class CrawlStats:
         self.urls_skipped: int = 0
         self.search_queries_done: int = 0
         self.links_extracted: int = 0
+        self.tokens_total: int = 0
         self.start_time: float = time.time()
         self._lock = asyncio.Lock()
 
@@ -82,7 +98,8 @@ class CrawlStats:
             f"✅ Success: {self.urls_success}\n"
             f"❌ Failed: {self.urls_failed}\n"
             f"⏭ Skipped: {self.urls_skipped}\n"
-            f"🔗 Links extracted: {self.links_extracted}"
+            f"🔗 Links extracted: {self.links_extracted}\n"
+            f"🧮 Tokens (Qwen): {self.tokens_total}"
         )
 
 
@@ -97,6 +114,32 @@ class CrawlEngine:
         self.url_queue: asyncio.Queue[str] = asyncio.Queue()
         self.visited: set[str] = set()
         self._visited_lock = asyncio.Lock()
+
+        # Instance ID for multi-worker isolation (no folder splitting; keep everything under data/raw)
+        self.instance_id = self._sanitize_instance_id(settings.INSTANCE_ID)
+        self.data_dir = settings.DATA_DIR
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+        suffix = f"_{self.instance_id}" if self.instance_id else ""
+
+        # Data files (always write crawl outputs into data/raw/)
+        self.raw_dir = self.data_dir / "raw"
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+
+        # Persistent dedupe (across restarts): visited URLs + content hashes
+        # Prefer DB next to raw outputs so your pipeline stays: data/raw -> processed -> gold
+        raw_db_path = (self.raw_dir / f"dedupe{suffix}.sqlite3")
+
+        # Backward-compatible fallback ONLY for default instance
+        legacy_db_path = (self.data_dir / "dedupe.sqlite3")
+        default_raw_db_path = (self.raw_dir / "dedupe.sqlite3")
+        if not suffix and legacy_db_path.exists() and not default_raw_db_path.exists():
+            self._dedupe_db_path = legacy_db_path
+        else:
+            self._dedupe_db_path = raw_db_path
+
+        self._db: aiosqlite.Connection | None = None
+        self._db_lock = asyncio.Lock()
 
         # Per-domain cap: max pages saved per domain to ensure diversity
         self.domain_counter: dict[str, int] = collections.defaultdict(int)
@@ -113,14 +156,22 @@ class CrawlEngine:
         self.is_running: bool = False
 
         # Discovery
-        self.discovery = DiscoveryEngine(max_pages_per_query=3)
+        self.discovery = DiscoveryEngine(
+            max_pages_per_query=3,
+            shard_index=settings.DISCOVERY_SHARD_INDEX,
+            shard_count=settings.DISCOVERY_SHARD_COUNT,
+        )
 
         # Notify callback (set by bot)
         self._notify_callback: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None
 
-        # Data files
-        self.output_file = settings.DATA_DIR / "dataset.jsonl"        # raw markdown + full metadata
-        self.output_cpt_file = settings.DATA_DIR / "dataset_cpt.jsonl"  # clean plain text for CPT
+        # Output naming: raw first; processed stages later (not "CPT" yet)
+        self.output_file = self.raw_dir / f"dataset_raw{suffix}.jsonl"  # raw crawl output + metadata
+        self.output_processed_1_file = self.raw_dir / f"dataset_raw_processed_1{suffix}.jsonl"  # stage-1 cleaned text
+
+        # Tokenizer (lazy init)
+        self._hf_tokenizer = None
+        self._hf_tokenizer_failed = False
 
     def set_notify_callback(self, callback) -> None:
         """Set callback untuk notifikasi Telegram."""
@@ -133,6 +184,316 @@ class CrawlEngine:
                 await self._notify_callback(message)
             except Exception:
                 pass
+
+    def _sanitize_instance_id(self, instance_id: str) -> str:
+        """Sanitize instance id to a safe directory name (prevents path traversal)."""
+        raw = (instance_id or "").strip()
+        if not raw:
+            return ""
+
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)
+        safe = safe.strip("._-")
+        return safe[:64] if safe else ""
+
+    # ------------------------------------------------------------------
+    # Persistent dedupe helpers
+    # ------------------------------------------------------------------
+
+    def _normalize_url(self, url: str) -> str:
+        """Normalize URL for stable dedupe (remove fragments + tracking params)."""
+        url = (url or "").strip()
+        if not url:
+            return ""
+
+        # Strip fragment early
+        url = url.split("#")[0]
+
+        try:
+            parts = urlsplit(url)
+        except Exception:
+            return ""
+
+        # Normalize scheme + netloc
+        scheme = (parts.scheme or "").lower()
+        netloc = (parts.netloc or "").lower()
+        path = parts.path or ""
+
+        # Remove common tracking params
+        blocked_params = {
+            "fbclid",
+            "gclid",
+            "yclid",
+            "igshid",
+            "mc_cid",
+            "mc_eid",
+            "ref",
+            "ref_src",
+        }
+        query_items = []
+        for k, v in parse_qsl(parts.query, keep_blank_values=False):
+            k_lower = k.lower()
+            if k_lower.startswith("utm_"):
+                continue
+            if k_lower in blocked_params:
+                continue
+            query_items.append((k, v))
+        query_items.sort()
+        query = urlencode(query_items, doseq=True)
+
+        # Normalize trailing slash
+        if path.endswith("/") and path != "/":
+            path = path.rstrip("/")
+
+        return urlunsplit((scheme, netloc, path, query, ""))
+
+    async def _open_dedupe_db(self) -> None:
+        if self._db is not None:
+            return
+
+        self._dedupe_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = await aiosqlite.connect(self._dedupe_db_path, timeout=30)
+        await self._db.execute("PRAGMA journal_mode=WAL;")
+        await self._db.execute("PRAGMA synchronous=NORMAL;")
+        await self._db.execute("PRAGMA busy_timeout=5000;")
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS visited_urls (url TEXT PRIMARY KEY)"
+        )
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS content_hashes (hash TEXT PRIMARY KEY)"
+        )
+        await self._db.commit()
+
+    async def _close_dedupe_db(self) -> None:
+        if self._db is None:
+            return
+        try:
+            await self._db.close()
+        finally:
+            self._db = None
+
+    async def _dedupe_insert(self, table: str, column: str, value: str) -> bool:
+        """Return True if value is new (inserted), False if already existed."""
+        if self._db is None:
+            return True
+
+        allowed = {
+            ("visited_urls", "url"),
+            ("content_hashes", "hash"),
+        }
+        if (table, column) not in allowed:
+            raise ValueError("Invalid dedupe target")
+
+        async with self._db_lock:
+            cur = await self._db.execute(
+                f"INSERT OR IGNORE INTO {table}({column}) VALUES (?)",
+                (value,),
+            )
+            changes_cur = await self._db.execute("SELECT changes()")
+            try:
+                row = await changes_cur.fetchone()
+                await self._db.commit()
+                return bool(row and row[0] == 1)
+            finally:
+                await cur.close()
+                await changes_cur.close()
+
+    async def _is_new_content(self, content: str) -> bool:
+        """Content-level dedupe using SHA-256 of normalized cleaned text."""
+        if not content:
+            return False
+        normalized = " ".join(content.lower().split())
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return await self._dedupe_insert("content_hashes", "hash", digest)
+
+    def _estimate_extraction_quality(self, content: str, *, title: str = "") -> float:
+        """Heuristik quality score 0..1 untuk gating ekstraksi.
+
+        Tujuan: menolak halaman dangkal/boilerplate tanpa terlalu kompleks.
+        """
+        if not content:
+            return 0.0
+
+        text = " ".join(content.split())
+        words = text.split()
+        wc = len(words)
+
+        if wc >= 400:
+            q = 0.95
+        elif wc >= 250:
+            q = 0.90
+        elif wc >= 150:
+            q = 0.82
+        elif wc >= 110:
+            q = 0.78
+        else:
+            q = 0.60
+
+        # Penalize link-heavy pages
+        link_hits = text.lower().count("http")
+        if link_hits > max(3, wc // 80):
+            q -= 0.05
+
+        # Slight boost if title appears in content
+        t = (title or "").strip().lower()
+        if len(t) >= 8 and t in text.lower():
+            q += 0.02
+
+        if q < 0.0:
+            return 0.0
+        if q > 1.0:
+            return 1.0
+        return q
+
+    def _extract_main_content_css(self, html: str) -> str:
+        """Best-effort main-article extraction using CSS selectors.
+
+        Returns plain text (paragraphs joined by blank lines) or empty string.
+        """
+        if not html or BeautifulSoup is None:
+            return ""
+
+        # Prefer lxml if available; fallback to html.parser
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            soup = BeautifulSoup(html, "html.parser")
+
+        # Drop obvious boilerplate early
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "form"]):
+            try:
+                tag.decompose()
+            except Exception:
+                pass
+
+        selectors = [
+            "article",
+            "main article",
+            "main",
+            "[role='main']",
+            ".post-content",
+            ".entry-content",
+            ".article-body",
+            ".article-content",
+            ".content-area",
+            ".td-post-content",
+            ".post-body",
+            "#content",
+        ]
+
+        root = None
+        for sel in selectors:
+            try:
+                node = soup.select_one(sel)
+            except Exception:
+                node = None
+            if node is not None:
+                root = node
+                break
+
+        if root is None:
+            root = soup.body or soup
+
+        paras: list[str] = []
+        for p in root.find_all("p"):
+            txt = p.get_text(" ", strip=True)
+            if txt:
+                paras.append(txt)
+
+        # Fallback: if no <p>, grab text blocks
+        if not paras:
+            txt = root.get_text("\n", strip=True)
+            paras = [x.strip() for x in txt.splitlines() if x.strip()]
+
+        text = "\n\n".join(paras)
+        return text.strip()
+
+    def _select_main_paragraphs(self, text: str) -> str:
+        """Keep only good paragraphs (avoid headings/minimal/repetitive lines)."""
+        if not text:
+            return ""
+
+        raw = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Prefer paragraph boundaries; fallback to line split
+        parts = [p.strip() for p in re.split(r"\n{2,}", raw) if p.strip()]
+        if len(parts) <= 1:
+            parts = [p.strip() for p in raw.split("\n") if p.strip()]
+
+        # User intent: paragraph inti biasanya > 30 kata; jangan ketat untuk panjang maksimal
+        min_words = 15
+        min_chars = 50
+        max_chars = 0  # 0 = no max
+
+        kept: list[str] = []
+        seen: set[str] = set()
+
+        for p in parts:
+            # Strip obvious markdown headings/bullets
+            p = re.sub(r"^#{1,6}\s+", "", p)
+            p = re.sub(r"^[-*•]+\s+", "", p)
+            p = " ".join(p.split())
+
+            if len(p) < min_chars:
+                continue
+            if max_chars and len(p) > max_chars:
+                continue
+            if len(p.split()) < min_words:
+                continue
+
+            key = re.sub(r"\W+", "", p.lower())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            kept.append(p)
+
+        out = "\n\n".join(kept).strip()
+        if not out:
+            return ""
+        return out + "\n"
+
+    def _count_tokens_qwen(self, text: str) -> int:
+        """Count tokens using a Qwen tokenizer (best-effort).
+
+        Uses HuggingFace `transformers` AutoTokenizer if available; otherwise falls back
+        to a cheap approximation (word count). This should never crash the crawler.
+        """
+        if not text:
+            return 0
+
+        # Keep it bounded for performance
+        sample = text if len(text) <= 200000 else text[:200000]
+
+        model_id = (getattr(self.settings, "TOKENIZER_MODEL_ID", "") or "").strip()
+        if not model_id:
+            return 0
+
+        if self._hf_tokenizer_failed:
+            return len(sample.split())
+
+        if self._hf_tokenizer is None:
+            try:
+                import importlib
+
+                transformers = importlib.import_module("transformers")
+                AutoTokenizer = getattr(transformers, "AutoTokenizer")
+
+                self._hf_tokenizer = AutoTokenizer.from_pretrained(
+                    model_id,
+                    use_fast=True,
+                    trust_remote_code=bool(
+                        getattr(self.settings, "TOKENIZER_TRUST_REMOTE_CODE", False)
+                    ),
+                )
+            except Exception as exc:
+                self._hf_tokenizer_failed = True
+                logger.warning("Tokenizer init failed (%s): %s", model_id, str(exc)[:200])
+                return len(sample.split())
+
+        try:
+            # `encode` is supported for both fast/slow tokenizers
+            return len(self._hf_tokenizer.encode(sample, add_special_tokens=False))
+        except Exception:
+            return len(sample.split())
 
     # ------------------------------------------------------------------
     # Browser & run config builders
@@ -169,8 +530,25 @@ class CrawlEngine:
                 "body_width": 0,
             },
         )
+
+        # Optional: if Crawl4AI provides RsTrafilaturaStrategy in this version,
+        # use it to extract higher-precision markdown.
+        extraction_strategy = None
+        try:
+            from crawl4ai.extraction_strategy import RsTrafilaturaStrategy
+
+            strategy = RsTrafilaturaStrategy()
+            if hasattr(strategy, "output_markdown"):
+                setattr(strategy, "output_markdown", True)
+            if hasattr(strategy, "favor_precision"):
+                setattr(strategy, "favor_precision", True)
+            extraction_strategy = strategy
+        except Exception:
+            extraction_strategy = None
+
         return CrawlerRunConfig(
             markdown_generator=md_generator,
+            extraction_strategy=extraction_strategy,
             cache_mode=cache,
             word_count_threshold=50,
             page_timeout=self.settings.PAGE_TIMEOUT,
@@ -207,15 +585,19 @@ class CrawlEngine:
 
     async def _try_enqueue(self, url: str) -> bool:
         """Add URL to queue if not visited. Returns True if added."""
-        # Normalize
-        url = url.split("#")[0].rstrip("/")
+        url = self._normalize_url(url)
         if not url:
             return False
 
+        # Fast in-run dedupe
         async with self._visited_lock:
             if url in self.visited:
                 return False
             self.visited.add(url)
+
+        # Persistent dedupe across restarts
+        if not await self._dedupe_insert("visited_urls", "url", url):
+            return False
 
         await self.url_queue.put(url)
         await self.stats.incr("urls_discovered")
@@ -379,17 +761,90 @@ class CrawlEngine:
                 self.url_queue.task_done()
                 continue
 
-            # Extract markdown content
-            md = getattr(result, "markdown", None)
-            if isinstance(md, str):
-                content = md
-            elif md is not None:
-                content = (
-                    getattr(md, "fit_markdown", None)
-                    or getattr(md, "raw_markdown", "")
-                )
-            else:
-                content = ""
+            title = result.metadata.get("title", "") if result.metadata else ""
+
+            # Extract main content (prefer extraction_strategy → CSS selector → Trafilatura → markdown)
+            content = ""
+            extraction_quality: float | None = None
+            extraction_quality_source = "none"
+            extraction_source = "none"
+
+            html = result.html or ""
+
+            # 1) If an extraction_strategy produced extracted_content, prefer it
+            extracted_payload = getattr(result, "extracted_content", None)
+            if isinstance(extracted_payload, str) and extracted_payload.strip():
+                try:
+                    data = json.loads(extracted_payload)
+                    item: dict | None = None
+
+                    if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
+                        item = max(
+                            data,
+                            key=lambda x: float(x.get("extraction_quality", 0.0) or 0.0),
+                        )
+                    elif isinstance(data, dict):
+                        item = data
+
+                    if item is not None:
+                        q = item.get("extraction_quality")
+                        if isinstance(q, (int, float)):
+                            extraction_quality = float(q)
+                            extraction_quality_source = "strategy"
+
+                        raw = (
+                            item.get("content_markdown")
+                            or item.get("markdown")
+                            or item.get("main_content")
+                            or item.get("content")
+                            or ""
+                        )
+                        if isinstance(raw, str) and raw.strip():
+                            content = raw.strip()
+                            extraction_source = "extraction_strategy"
+                except Exception:
+                    content = ""
+
+            # 2) CSS selector extraction (more selective for main article)
+            if not content and html:
+                css_text = self._extract_main_content_css(html)
+                if css_text:
+                    content = css_text.strip()
+                    extraction_source = "css_selector"
+
+            # 3) Trafilatura fallback
+            if not content and trafilatura_extract is not None and html:
+                try:
+                    extracted = trafilatura_extract(
+                        html,
+                        url=url,
+                        include_comments=False,
+                        include_tables=False,
+                    )
+                except TypeError:
+                    # Signature differs across Trafilatura versions
+                    extracted = trafilatura_extract(html, url=url)
+                except Exception:
+                    extracted = None
+
+                if extracted:
+                    content = extracted.strip()
+                    extraction_source = "trafilatura"
+
+            # 4) Markdown fallback
+            if not content:
+                md = getattr(result, "markdown", None)
+                if isinstance(md, str):
+                    content = md.strip()
+                    extraction_source = "crawl4ai_markdown"
+                elif md is not None:
+                    content = (
+                        getattr(md, "fit_markdown", None)
+                        or getattr(md, "raw_markdown", "")
+                    ).strip()
+                    extraction_source = "crawl4ai_markdown"
+                else:
+                    content = ""
 
             if len(content.strip()) < 100:
                 await self.stats.incr("urls_skipped")
@@ -399,6 +854,35 @@ class CrawlEngine:
             # --- CONTENT CLEANING: strip UI noise (nav, buttons, etc.) ---
             content = clean_markdown(content)
             if len(content.strip()) < 100:
+                await self.stats.incr("urls_skipped")
+                self.url_queue.task_done()
+                continue
+
+            # --- MAIN PARAGRAPH SELECTION: drop headings/minimal/repetitive lines ---
+            content = self._select_main_paragraphs(content)
+            if len(content.strip()) < 250:
+                await self.stats.incr("urls_skipped")
+                self.url_queue.task_done()
+                continue
+
+            # --- EXTRACTION QUALITY GATE: skip low-quality extraction ---
+            if extraction_quality is None:
+                extraction_quality = self._estimate_extraction_quality(content, title=title)
+                extraction_quality_source = "heuristic"
+
+            if extraction_quality < self.settings.MIN_EXTRACTION_QUALITY:
+                await self.stats.incr("urls_skipped")
+                logger.debug(
+                    "⏭ Low extraction quality (%.2f/%.2f), skip: %s",
+                    extraction_quality,
+                    self.settings.MIN_EXTRACTION_QUALITY,
+                    url,
+                )
+                self.url_queue.task_done()
+                continue
+
+            # --- CONTENT DEDUPE: skip duplicate articles across runs ---
+            if not await self._is_new_content(content):
                 await self.stats.incr("urls_skipped")
                 self.url_queue.task_done()
                 continue
@@ -424,8 +908,6 @@ class CrawlEngine:
                 continue
 
             # --- RELEVANCE GATE: tolak konten asing / tidak relevan ---
-            combined_text = f"{content}"
-            title = result.metadata.get("title", "") if result.metadata else ""
             combined_text = f"{title} {content}"
 
             # Cek bahasa Indonesia (kecuali URL bahasa Inggris)
@@ -438,14 +920,41 @@ class CrawlEngine:
                 self.url_queue.task_done()
                 continue
 
-            # Cek relevance score (minimal N keyword match)
-            score = relevance_score(combined_text)
-            min_score = self.settings.MIN_RELEVANCE_SCORE
-            if score < min_score:
+            # Cek relevance score berbasis frasa (>= 2 kata) — lebih selektif untuk STEM/humaniora
+            phrase_keywords = [kw for kw in TARGET_KEYWORDS if len(kw.split()) >= 2]
+            exact_score = relevance_score(combined_text, phrase_keywords)
+            min_score = getattr(self.settings, "MIN_PHRASE_RELEVANCE_SCORE", 1)
+
+            fuzzy_score = 0
+            fuzzy_hits: list[dict] = []
+            if exact_score < min_score:
+                # Fuzzy hanya pakai term berbasis frasa (>= 2 kata) untuk konteks lebih kuat
+                fuzzy_vocab = [
+                    t for t in (SCIENCE_VOCAB_ID + phrase_keywords)
+                    if len((t or "").split()) >= 2
+                ]
+                fuzzy_score, fuzzy_hits = fuzzy_science_relevance(
+                    combined_text,
+                    threshold=self.settings.FUZZY_SCIENCE_THRESHOLD,
+                    min_hits=self.settings.FUZZY_SCIENCE_MIN_HITS,
+                    vocab=fuzzy_vocab,
+                )
+
+            passed_exact = exact_score >= min_score
+            passed_fuzzy = (
+                fuzzy_score >= self.settings.FUZZY_SCIENCE_THRESHOLD
+                and len(fuzzy_hits) >= self.settings.FUZZY_SCIENCE_MIN_HITS
+            )
+
+            if not (passed_exact or passed_fuzzy):
                 await self.stats.incr("urls_skipped")
                 logger.debug(
-                    "⏭ Low relevance (%d/%d keywords), skip: %s",
-                    score, min_score, url,
+                    "⏭ Low relevance (exact=%d/%d, fuzzy=%d/%d), skip: %s",
+                    exact_score,
+                    min_score,
+                    fuzzy_score,
+                    self.settings.FUZZY_SCIENCE_THRESHOLD,
+                    url,
                 )
                 self.url_queue.task_done()
                 continue
@@ -460,20 +969,40 @@ class CrawlEngine:
             kw = extract_keywords_found(content)
             record["metadata"]["level"] = level
             record["metadata"]["keywords_found"] = kw
-            record["metadata"]["relevance_score"] = score
+            record["metadata"]["relevance_score"] = exact_score
+            record["metadata"]["fuzzy_science_score"] = fuzzy_score
+            record["metadata"]["fuzzy_science_hits"] = fuzzy_hits
+            record["metadata"]["extraction_quality"] = extraction_quality
+            record["metadata"]["extraction_quality_source"] = extraction_quality_source
+            record["metadata"]["extraction_source"] = extraction_source
 
             append_jsonl(self.output_file, record)
 
-            # Also save CPT-ready version (clean plain text)
-            cpt_record = build_cpt_record(
-                url, title, content,
+            # Also save stage-1 processed text (not "CPT" yet)
+            processed_1_record = build_cpt_record(
+                url,
+                title,
+                content,
                 level=level,
                 source_domain=save_domain,
             )
-            if cpt_record is not None and cpt_record["word_count"] >= 75:
-                append_jsonl(self.output_cpt_file, cpt_record)
+            saved_processed_1 = False
+            if processed_1_record is not None and processed_1_record["word_count"] >= 75:
+                append_jsonl(self.output_processed_1_file, processed_1_record)
+                saved_processed_1 = True
             else:
-                logger.debug("⏭ CPT quality gate rejected: %s", url)
+                logger.debug("⏭ Processed-1 quality gate rejected: %s", url)
+
+            # Token counting (Qwen) for milestone reporting
+            token_text = ""
+            if saved_processed_1 and processed_1_record is not None:
+                token_text = processed_1_record.get("text", "") or ""
+            if not token_text:
+                token_text = content
+
+            tokens = self._count_tokens_qwen(token_text)
+            if tokens > 0:
+                await self.stats.incr("tokens_total", tokens)
 
             await self.stats.incr("urls_success")
 
@@ -528,12 +1057,14 @@ class CrawlEngine:
         self._pages_since_restart = 0
         self.is_running = True
 
+        await self._open_dedupe_db()
+
         await self._notify(
             "🚀 *Crawler dimulai — Endless Mode*\n"
             f"Workers: {self.settings.MAX_CONCURRENCY}\n"
-            f"Output:\n"
-            f"  • dataset.jsonl (raw markdown)\n"
-            f"  • dataset\_cpt.jsonl (clean text for CPT)\n"
+            f"Output (data/raw):\n"
+            f"  • raw/{self.output_file.name} (raw crawl output)\n"
+            f"  • raw/{self.output_processed_1_file.name} (stage-1 processed text)\n"
             f"Browser restart setiap: {self.RESTART_BROWSER_EVERY} halaman\n"
             "Gunakan /stop untuk menghentikan."
         )
@@ -669,3 +1200,4 @@ class CrawlEngine:
         )
         logger.info(report)
         await self._notify(report)
+        await self._close_dedupe_db()

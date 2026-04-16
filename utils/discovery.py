@@ -572,9 +572,19 @@ def extract_links_from_page(html: str, base_url: str) -> list[str]:
 class DiscoveryEngine:
     """Mesin pencarian URL menggunakan search engine."""
 
-    def __init__(self, max_pages_per_query: int = 3) -> None:
+    def __init__(
+        self,
+        max_pages_per_query: int = 3,
+        shard_index: int = 0,
+        shard_count: int = 1,
+    ) -> None:
         self.max_pages_per_query = max_pages_per_query
         self.query_index: int = 0
+
+        # Optional sharding for multi-worker setups.
+        # Each worker processes only 1/N of generated search URLs.
+        self.shard_count = max(1, int(shard_count))
+        self.shard_index = int(shard_index) % self.shard_count
 
     def get_all_search_urls(self) -> list[tuple[str, str]]:
         """Generate semua search URL.
@@ -588,6 +598,13 @@ class DiscoveryEngine:
             for page in range(self.max_pages_per_query):
                 search_urls.append((build_duckduckgo_url(query, page), "duckduckgo"))
                 search_urls.append((build_bing_url(query, page), "bing"))
+
+        if self.shard_count > 1:
+            search_urls = [
+                item
+                for idx, item in enumerate(search_urls)
+                if (idx % self.shard_count) == self.shard_index
+            ]
 
         return search_urls
 

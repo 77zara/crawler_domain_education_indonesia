@@ -11,10 +11,13 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
+import re
 import signal
 import sys
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Event loop policy: gunakan uvloop di Linux/macOS, fallback di Windows
@@ -27,38 +30,129 @@ if sys.platform != "win32":
     except ImportError:
         pass  # Fallback ke default asyncio event loop
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("data/crawler.log", encoding="utf-8"),
-    ],
-)
 logger = logging.getLogger("main")
 
 
-async def main() -> None:
-    """Entry point utama — inisialisasi dan jalankan bot + crawler."""
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=True)
+
+    run_mode = parser.add_mutually_exclusive_group()
+    run_mode.add_argument(
+        "--test",
+        action="store_true",
+        help="Jalankan crawler singkat untuk smoke test lalu exit.",
+    )
+    run_mode.add_argument(
+        "--production",
+        action="store_true",
+        help="Jalankan crawler langsung (tanpa Telegram /run).",
+    )
+
+    run_state = parser.add_mutually_exclusive_group()
+    run_state.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume output+dedupe yang sudah ada (default).",
+    )
+    run_state.add_argument(
+        "--restart",
+        action="store_true",
+        help="Mulai run baru dengan INSTANCE_ID baru (output+dedupe terpisah).",
+    )
+
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Override MAX_CONCURRENCY.",
+    )
+    parser.add_argument(
+        "--instance-id",
+        type=str,
+        default=None,
+        help="Override INSTANCE_ID (untuk multi-worker di server).",
+    )
+
+    # Test-only limits
+    parser.add_argument(
+        "--max-success",
+        type=int,
+        default=5,
+        help="(test) Stop setelah N halaman sukses.",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=int,
+        default=120,
+        help="(test) Stop setelah N detik.",
+    )
+
+    return parser.parse_args(argv)
+
+
+async def main(args: argparse.Namespace) -> None:
+    """Entry point utama — inisialisasi dan jalankan bot atau crawler."""
     from config import Settings, DATA_DIR
     from core.crawler import CrawlEngine
     from core.bot import TelegramController
 
-    # Pastikan data directory ada
-    DATA_DIR.mkdir(exist_ok=True)
-
-    # Load settings
+    # Load settings (.env)
     settings = Settings()
+
+    # Apply CLI overrides
+    if args.restart:
+        run_id = (args.instance_id or "").strip()
+        if not run_id:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            run_id = f"run_{ts}"
+        settings.INSTANCE_ID = run_id
+    elif args.instance_id:
+        settings.INSTANCE_ID = args.instance_id.strip()
+
+    if args.workers is not None:
+        settings.MAX_CONCURRENCY = max(1, int(args.workers))
+    elif args.production:
+        settings.MAX_CONCURRENCY = max(settings.MAX_CONCURRENCY, 10)
+    elif args.test:
+        settings.MAX_CONCURRENCY = min(max(settings.MAX_CONCURRENCY, 1), 2)
+
+    if args.production:
+        settings.HEADLESS = True
+        settings.CACHE_MODE = "enabled"
+    if args.test:
+        settings.HEADLESS = True
+        settings.CACHE_MODE = "bypass"
+        settings.NOTIFY_EVERY = 1
+
+    # Logging setup (instance-scoped; safe for multi-process workers)
+    raw_instance_id = (settings.INSTANCE_ID or "").strip()
+    safe_instance_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_instance_id).strip("._-")[:64]
+    log_dir = DATA_DIR / safe_instance_id if safe_instance_id else DATA_DIR
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_dir / "crawler.log", encoding="utf-8"),
+        ],
+        force=True,
+    )
+
     stop_event = asyncio.Event()
 
     logger.info("=" * 60)
     logger.info("AITF SR-02 Crawler — Tim 2 Sekolah Rakyat")
     logger.info("Mode: Endless Search Engine Crawler")
     logger.info("=" * 60)
+    logger.info("Instance ID   : %s", safe_instance_id or "(default)")
+    logger.info(
+        "Discovery shard: %d/%d",
+        settings.DISCOVERY_SHARD_INDEX,
+        settings.DISCOVERY_SHARD_COUNT,
+    )
     logger.info("Concurrency   : %d", settings.MAX_CONCURRENCY)
     logger.info("Cache mode    : %s", settings.CACHE_MODE)
     logger.info("Search delay  : %.1fs", settings.SEARCH_DELAY)
@@ -66,23 +160,49 @@ async def main() -> None:
     logger.info("Telegram Bot  : %s", "Configured" if settings.TELEGRAM_BOT_TOKEN else "NOT SET")
     logger.info("=" * 60)
 
-    # Inisialisasi engine & controller
     engine = CrawlEngine(settings, stop_event)
-    controller = TelegramController(settings, engine)
 
     # Handle SIGINT/SIGTERM untuk graceful shutdown
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(
-                sig,
-                lambda: asyncio.create_task(_shutdown(engine)),
-            )
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown(engine)))
         except NotImplementedError:
-            # Windows tidak mendukung add_signal_handler untuk SIGINT
             pass
 
-    # Start controller (Telegram bot polling, atau standalone jika token kosong)
+    run_direct = bool(args.production or args.test or not settings.TELEGRAM_BOT_TOKEN)
+    if run_direct:
+        if args.test:
+            logger.info(
+                "Test mode: stop setelah %d sukses atau %d detik",
+                args.max_success,
+                args.max_seconds,
+            )
+
+            async def stop_on_success() -> None:
+                while not engine.stop_event.is_set():
+                    if engine.stats.urls_success >= max(1, int(args.max_success)):
+                        engine.stop_event.set()
+                        break
+                    await asyncio.sleep(1)
+
+            async def stop_on_timeout() -> None:
+                await asyncio.sleep(max(1, int(args.max_seconds)))
+                engine.stop_event.set()
+
+            t1 = asyncio.create_task(stop_on_success(), name="stop-on-success")
+            t2 = asyncio.create_task(stop_on_timeout(), name="stop-on-timeout")
+            try:
+                await engine.run()
+            finally:
+                t1.cancel()
+                t2.cancel()
+        else:
+            await engine.run()
+        return
+
+    # Telegram mode
+    controller = TelegramController(settings, engine)
     await controller.start()
 
 
@@ -94,7 +214,8 @@ async def _shutdown(engine) -> None:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        _args = parse_args()
+        asyncio.run(main(_args))
     except KeyboardInterrupt:
         logger.info("Dihentikan oleh user (Ctrl+C).")
     except Exception as exc:
