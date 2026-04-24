@@ -199,6 +199,85 @@ async def main(args: argparse.Namespace) -> None:
                 except Exception:
                     pass
 
+        # Seed: Detik.com/edu
+        if getattr(args, "only_domain", None) and args.only_domain.lower().endswith("detik.com"):
+            seeds = [
+                "https://www.detik.com/edu",
+                "https://www.detik.com/edu/",
+                "https://www.detik.com/edu/sekolah",
+                "https://www.detik.com/edu/perguruan-tinggi",
+                "https://www.detik.com/edu/edutainment",
+            ]
+            for s in seeds:
+                try:
+                    await engine._try_enqueue(s)
+                except Exception:
+                    pass
+
+        # Seed: Ruangguru Blog
+        if getattr(args, "only_domain", None) and args.only_domain.lower().endswith("ruangguru.com"):
+            seeds = [
+                "https://www.ruangguru.com/blog",
+                "https://www.ruangguru.com/blog/",
+            ]
+            for s in seeds:
+                try:
+                    await engine._try_enqueue(s)
+                except Exception:
+                    pass
+
+        # Seed: Liputan6
+        if getattr(args, "only_domain", None) and args.only_domain.lower().endswith("liputan6.com"):
+            seeds = [
+                "https://www.liputan6.com/news",
+                "https://www.liputan6.com/education",
+                "https://www.liputan6.com/",
+            ]
+            for s in seeds:
+                try:
+                    await engine._try_enqueue(s)
+                except Exception:
+                    pass
+
+        # Seed: Republika.co.id
+        if getattr(args, "only_domain", None) and args.only_domain.lower().endswith("republika.co.id"):
+            seeds = [
+                "https://news.republika.co.id/berita/nasional/pendidikan",
+                "https://republika.co.id/berita/nasional/umum",
+                "https://republika.co.id/",
+            ]
+            for s in seeds:
+                try:
+                    await engine._try_enqueue(s)
+                except Exception:
+                    pass
+
+        # Seed: Quipper Blog
+        if getattr(args, "only_domain", None) and args.only_domain.lower().endswith("quipper.com"):
+            seeds = [
+                "https://www.quipper.com/id/blog/",
+                "https://www.quipper.com/id/blog/materi-belajar/",
+                "https://www.quipper.com/id/blog/tips-trick/",
+            ]
+            for s in seeds:
+                try:
+                    await engine._try_enqueue(s)
+                except Exception:
+                    pass
+
+        # Seed: Zenius Blog
+        if getattr(args, "only_domain", None) and args.only_domain.lower().endswith("zenius.net"):
+            seeds = [
+                "https://www.zenius.net/blog/",
+                "https://www.zenius.net/blog/category/materi-belajar/",
+                "https://www.zenius.net/blog/category/tips-belajar/",
+            ]
+            for s in seeds:
+                try:
+                    await engine._try_enqueue(s)
+                except Exception:
+                    pass
+
     # Handle SIGINT/SIGTERM untuk graceful shutdown
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

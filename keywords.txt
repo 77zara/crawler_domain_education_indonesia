@@ -180,3 +180,108 @@ teks eksplanasi(site:www.kompas.com)
 teks prosedur(site:www.kompas.com)
 analisis cerpen(site:www.kompas.com)
 seni budaya(site:www.kompas.com)
+
+# ===========================================================================
+# Detik.com/edu keywords
+# ===========================================================================
+Pendidikan Indonesia(site:www.detik.com)
+Sekolah Rakyat(site:www.detik.com)
+Kurikulum Merdeka(site:www.detik.com)
+Kurikulum Nasional(site:www.detik.com)
+Capaian Pembelajaran(site:www.detik.com)
+Modul Ajar(site:www.detik.com)
+Ujian Nasional(site:www.detik.com)
+Asesmen Nasional(site:www.detik.com)
+Matematika(site:www.detik.com)
+Fisika(site:www.detik.com)
+Kimia(site:www.detik.com)
+Biologi(site:www.detik.com)
+Bahasa Indonesia(site:www.detik.com)
+Bahasa Inggris(site:www.detik.com)
+Profil Pelajar Pancasila(site:www.detik.com)
+Guru Penggerak(site:www.detik.com)
+Soal Ujian(site:www.detik.com)
+Latihan Soal(site:www.detik.com)
+Bank Soal(site:www.detik.com)
+Olimpiade Sains Nasional(site:www.detik.com)
+Materi Pelajaran(site:www.detik.com)
+Sekolah Dasar(site:www.detik.com)
+Sekolah Menengah(site:www.detik.com)
+Pendidikan Karakter(site:www.detik.com)
+
+# ===========================================================================
+# Ruangguru.com/blog keywords
+# ===========================================================================
+materi pelajaran(site:www.ruangguru.com)
+kurikulum merdeka(site:www.ruangguru.com)
+materi matematika(site:www.ruangguru.com)
+materi fisika(site:www.ruangguru.com)
+materi kimia(site:www.ruangguru.com)
+materi biologi(site:www.ruangguru.com)
+materi ekonomi(site:www.ruangguru.com)
+materi sejarah(site:www.ruangguru.com)
+bahasa indonesia(site:www.ruangguru.com)
+bahasa inggris(site:www.ruangguru.com)
+soal pembahasan(site:www.ruangguru.com)
+latihan soal(site:www.ruangguru.com)
+tips belajar(site:www.ruangguru.com)
+strategi belajar(site:www.ruangguru.com)
+pembelajaran efektif(site:www.ruangguru.com)
+
+# ===========================================================================
+# Liputan6.com keywords
+# ===========================================================================
+Pendidikan Indonesia(site:www.liputan6.com)
+Sekolah Rakyat(site:www.liputan6.com)
+Kurikulum Merdeka(site:www.liputan6.com)
+Ujian Nasional(site:www.liputan6.com)
+Asesmen Nasional(site:www.liputan6.com)
+Pendidikan Karakter(site:www.liputan6.com)
+Profil Pelajar Pancasila(site:www.liputan6.com)
+Guru Penggerak(site:www.liputan6.com)
+Sekolah Dasar(site:www.liputan6.com)
+Sekolah Menengah(site:www.liputan6.com)
+Materi Pelajaran(site:www.liputan6.com)
+Soal Ujian(site:www.liputan6.com)
+Kemdikdasmen(site:www.liputan6.com)
+Kemendikbudristek(site:www.liputan6.com)
+
+# ===========================================================================
+# Republika.co.id keywords
+# ===========================================================================
+Pendidikan Indonesia(site:republika.co.id)
+Berita Sekolah(site:republika.co.id)
+Kemendikbud(site:republika.co.id)
+Kurikulum Merdeka(site:republika.co.id)
+Ujian Sekolah(site:republika.co.id)
+
+# ===========================================================================
+# Quipper.com/blog keywords
+# ===========================================================================
+materi pelajaran(site:www.quipper.com)
+tips belajar(site:www.quipper.com)
+materi utbk(site:www.quipper.com)
+contoh soal(site:www.quipper.com)
+kurikulum merdeka(site:www.quipper.com)
+rumus matematika(site:www.quipper.com)
+materi fisika(site:www.quipper.com)
+materi kimia(site:www.quipper.com)
+materi biologi(site:www.quipper.com)
+
+# ===========================================================================
+# Zenius.net/blog keywords
+# ===========================================================================
+materi pelajaran(site:www.zenius.net)
+tips belajar(site:www.zenius.net)
+persiapan utbk(site:www.zenius.net)
+soal pembahasan(site:www.zenius.net)
+rumus cepat(site:www.zenius.net)
+konsep dasar(site:www.zenius.net)
+materi matematika(site:www.zenius.net)
+materi fisika(site:www.zenius.net)
+materi kimia(site:www.zenius.net)
+materi biologi(site:www.zenius.net)
+materi sejarah(site:www.zenius.net)
+materi ekonomi(site:www.zenius.net)
+materi sosiologi(site:www.zenius.net)
+materi geografi(site:www.zenius.net)

@@ -388,6 +388,27 @@ class CrawlEngine:
             return 1
         if host.endswith("kompas.com"):
             return 2
+
+        # New domains (zara_adjust.md) — slightly lower priority than kompas
+        if host.endswith("detik.com") and "/edu/" in path:
+            return 3
+        if host.endswith("ruangguru.com") and "/blog/" in path:
+            return 4
+        if host.endswith("liputan6.com") and "/read/" in path:
+            return 5
+        if host.endswith("detik.com") or host.endswith("ruangguru.com") or host.endswith("liputan6.com"):
+            return 6
+
+        # Batch 2 domains (zara_adjust_1.md)
+        if host.endswith("republika.co.id") and "/berita/" in path:
+            return 7
+        if host.endswith("quipper.com") and "/blog/" in path:
+            return 8
+        if host.endswith("zenius.net") and "/blog/" in path:
+            return 9
+        if host.endswith("republika.co.id") or host.endswith("quipper.com") or host.endswith("zenius.net"):
+            return 9
+
         return 10
 
     def _utcnow_iso(self) -> str:
@@ -465,19 +486,36 @@ class CrawlEngine:
 
         now = self._utcnow_iso()
 
+        # Build optional domain filter from DOMAIN_WHITELIST
+        wl = getattr(self.settings, "DOMAIN_WHITELIST", None) or []
+        domain_filter_sql = ""
+        domain_filter_params: list[str] = []
+        if wl:
+            placeholders = ",".join("?" for _ in wl)
+            # Match exact domain or subdomain (e.g. 'detik.com' matches 'www.detik.com')
+            conditions: list[str] = []
+            for w in wl:
+                conditions.append("domain = ?")
+                domain_filter_params.append(w)
+                conditions.append("domain LIKE ?")
+                domain_filter_params.append(f"%.{w}")
+            domain_filter_sql = " AND (" + " OR ".join(conditions) + ")"
+
         async with self._db_lock:
             try:
                 await self._db.execute("BEGIN IMMEDIATE")
-                cur = await self._db.execute(
-                    """
+                query = f"""
                     SELECT id, url, domain, attempts, metadata_json
                     FROM url_jobs
                     WHERE status='pending'
                       AND (next_retry_at IS NULL OR next_retry_at <= ?)
-                                        ORDER BY priority ASC, created_at
+                      {domain_filter_sql}
+                    ORDER BY priority ASC, created_at
                     LIMIT 1
-                    """,
-                    (now,),
+                """
+                cur = await self._db.execute(
+                    query,
+                    (now, *domain_filter_params),
                 )
                 row = await cur.fetchone()
                 await cur.close()
@@ -1124,6 +1162,459 @@ class CrawlEngine:
             return len(sample.split())
 
     # ------------------------------------------------------------------
+    # Custom domain extraction methods (zara_adjust.md)
+    # ------------------------------------------------------------------
+
+    def _extract_detik(self, soup, strip_selectors: list[str]) -> str:
+        """Custom extraction for detik.com/edu articles.
+
+        Strategy (from zara_adjust.md):
+        1. Locate div.detail__body-text.itp_bodycontent
+        2. Strip noise selectors (.clearfix, table.linksisip, etc.)
+        3. Remove dateline <strong> from first paragraph
+        4. Extract direct child <p>, <ul>/<ol> > <li> only
+        """
+        if soup is None or BeautifulSoup is None:
+            return ""
+
+        wrapper = soup.select_one("div.detail__body-text.itp_bodycontent")
+        if not wrapper:
+            # Fallback: try broader selector
+            wrapper = soup.select_one("div.detail__body-text")
+        if not wrapper:
+            return ""
+
+        # Pre-clean: strip noise selectors from manifest + detik-specific
+        detik_noise = [
+            ".clearfix",
+            "table.linksisip",
+            "div.sisip_artikel",
+            "div.video-20detik",
+            "div.embed-video",
+        ]
+        for sel in list(strip_selectors) + detik_noise:
+            if not sel:
+                continue
+            try:
+                if sel.isidentifier():
+                    for tag in wrapper.find_all(sel):
+                        try:
+                            tag.decompose()
+                        except Exception:
+                            pass
+                else:
+                    for el in wrapper.select(sel):
+                        try:
+                            el.decompose()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Remove dateline <strong> from first paragraph
+        try:
+            first_p = wrapper.select_one("p:first-of-type")
+            if first_p:
+                strong = first_p.select_one("strong:first-child")
+                if strong:
+                    strong.decompose()
+                # Trim leftover leading hyphen/dash
+                if first_p.string:
+                    first_p.string = first_p.string.lstrip(" -\u2014\u2013")
+        except Exception:
+            pass
+
+        clean_content: list[str] = []
+
+        # Extract direct child <p> tags (using > combinator logic)
+        try:
+            for p in wrapper.find_all("p", recursive=False):
+                text = p.get_text(" ", strip=True)
+                if not text:
+                    continue
+                # Skip "Baca juga" / "Baca Juga" lines
+                if "Baca Juga" in text or "Baca juga" in text:
+                    continue
+                clean_content.append(text)
+        except Exception:
+            pass
+
+        # Extract list items
+        try:
+            for ul_or_ol in wrapper.find_all(["ul", "ol"], recursive=False):
+                for li in ul_or_ol.find_all("li"):
+                    text = li.get_text(" ", strip=True)
+                    if text:
+                        clean_content.append(f"- {text}")
+        except Exception:
+            pass
+
+        return "\n\n".join(clean_content).strip()
+
+    def _extract_ruangguru(self, soup, strip_selectors: list[str]) -> str:
+        """Custom extraction for ruangguru.com/blog articles.
+
+        Strategy (from zara_adjust.md):
+        1. Locate div.content-body
+        2. Pre-clean: destroy images, image captions, "Baca Juga" blocks
+        3. Iterate children sequentially (h2, h3, p, ol, ul)
+        4. Filter visual dividers, empty spacers, promotional intros
+        """
+        if soup is None or BeautifulSoup is None:
+            return ""
+
+        wrapper = soup.select_one("div.content-body")
+        if not wrapper:
+            return ""
+
+        # Pre-clean: strip manifest noise selectors
+        for sel in strip_selectors:
+            if not sel:
+                continue
+            try:
+                if sel.isidentifier():
+                    for tag in wrapper.find_all(sel):
+                        try:
+                            tag.decompose()
+                        except Exception:
+                            pass
+                else:
+                    for el in wrapper.select(sel):
+                        try:
+                            el.decompose()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Pre-clean: destroy all images (prevents alt text/URL bleeding)
+        try:
+            for img in wrapper.find_all("img"):
+                img.decompose()
+        except Exception:
+            pass
+
+        clean_content: list[str] = []
+
+        # Iterate through children sequentially
+        try:
+            for element in wrapper.find_all(["h2", "h3", "p", "ol", "ul"], recursive=False):
+                text = element.get_text(strip=True)
+
+                # Skip empty tags, visual spacers (\xa0), em-dashes
+                if not text or text == "\u2014" or text == "&#8212;" or text == "\xa0":
+                    continue
+
+                # Filter "Baca Juga", image captions, promotional intros
+                if "Baca Juga:" in text or "(Sumber:" in text or "Yuk simak" in text:
+                    continue
+
+                # Format by element type
+                if element.name == "h2":
+                    clean_content.append(f"## {text}")
+                elif element.name == "h3":
+                    clean_content.append(f"### {text}")
+                elif element.name == "ol":
+                    for i, li in enumerate(element.find_all("li"), start=1):
+                        li_text = li.get_text(strip=True)
+                        if li_text:
+                            clean_content.append(f"{i}. {li_text}")
+                elif element.name == "ul":
+                    for li in element.find_all("li"):
+                        li_text = li.get_text(strip=True)
+                        if li_text:
+                            clean_content.append(f"- {li_text}")
+                elif element.name == "p":
+                    clean_content.append(text)
+        except Exception:
+            pass
+
+        return "\n\n".join(clean_content).strip()
+
+    def _extract_liputan6(self, soup, strip_selectors: list[str]) -> str:
+        """Custom extraction for liputan6.com articles.
+
+        Strategy (from zara_adjust.md):
+        1. Locate div.article-content-body__item-content (or fallback)
+        2. Pre-clean: destroy ads, "BACA JUGA" blocks, tag snippets
+        3. Extract remaining <p> tags, filter "Advertisement" text
+        """
+        if soup is None or BeautifulSoup is None:
+            return ""
+
+        wrapper = soup.select_one("div.article-content-body__item-content")
+        if not wrapper:
+            wrapper = soup.select_one("div.article-content-body")
+        if not wrapper:
+            return ""
+
+        # Pre-clean: strip manifest noise + liputan6-specific selectors
+        liputan6_noise = [
+            "div.baca-juga-collections",
+            "div.advertisement-placeholder",
+            "div.article-ad",
+            "[id*='gpt-ad']",
+            "[id*='revive-ad']",
+            "div.tags--snippet",
+            "div#preco",
+        ]
+        for sel in list(strip_selectors) + liputan6_noise:
+            if not sel:
+                continue
+            try:
+                if sel.isidentifier():
+                    for tag in wrapper.find_all(sel):
+                        try:
+                            tag.decompose()
+                        except Exception:
+                            pass
+                else:
+                    for el in wrapper.select(sel):
+                        try:
+                            el.decompose()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        clean_content: list[str] = []
+
+        # Extract remaining <p> tags
+        try:
+            for p in wrapper.find_all("p"):
+                text = p.get_text(" ", strip=True)
+                if not text:
+                    continue
+                # Double-check: skip stray "Advertisement" text
+                if text.lower() == "advertisement":
+                    continue
+                # Skip "Baca Juga" that might survive DOM cleanup
+                if "BACA JUGA:" in text or "Baca Juga:" in text:
+                    continue
+                clean_content.append(text)
+        except Exception:
+            pass
+
+        return "\n\n".join(clean_content).strip()
+
+    def _extract_republika(self, soup, strip_selectors: list[str]) -> str:
+        """Custom extraction for republika.co.id articles.
+
+        Strategy (from zara_adjust_1.md):
+        1. Locate div.article-content
+        2. Pre-clean: destroy scripts, ad wrappers, internal links
+        3. Dateline Filter: Strip "REPUBLIKA.CO.ID, [CITY] - " using Regex
+        4. Extract <p> tags
+        """
+        if soup is None or BeautifulSoup is None:
+            return ""
+
+        wrapper = soup.select_one("div.article-content")
+        if not wrapper:
+            return ""
+
+        # Pre-clean: strip manifest noise + republika-specific
+        republika_noise = ["script", "[id*='div-gpt-ad']", "div.baca-juga", "div.terkait"]
+        for sel in list(strip_selectors) + republika_noise:
+            if not sel:
+                continue
+            try:
+                for el in wrapper.select(sel):
+                    el.decompose()
+            except Exception:
+                pass
+
+        clean_content: list[str] = []
+
+        # Iterate & Extract
+        try:
+            for p in wrapper.find_all("p"):
+                text = p.get_text(separator=" ", strip=True)
+                if not text:
+                    continue
+
+                # Clean Dateline (Regex to catch "REPUBLIKA.CO.ID, [CITY] - ")
+                if "REPUBLIKA.CO.ID" in text:
+                    text = re.sub(
+                        r"^REPUBLIKA\.CO\.ID,\s+[A-Z\s]+[-–—]+\s*",
+                        "",
+                        text,
+                        flags=re.IGNORECASE,
+                    )
+
+                if text:
+                    clean_content.append(text)
+        except Exception:
+            pass
+
+        return "\n\n".join(clean_content).strip()
+
+    def _extract_quipper(self, soup, strip_selectors: list[str]) -> str:
+        """Custom extraction for quipper.com/id/blog articles.
+
+        Strategy (from zara_adjust_1.md):
+        1. Locate div#penci-post-entry-inner
+        2. Pre-clean: destroy ToC, tags, pagination, image wrappers
+        3. Format: h2, h3, p, ol, ul with Markdown prefixing
+        """
+        if soup is None or BeautifulSoup is None:
+            return ""
+
+        wrapper = soup.select_one("div#penci-post-entry-inner")
+        if not wrapper:
+            return ""
+
+        # Pre-clean
+        quipper_noise = [
+            "div.lwptoc",
+            "div.post-tags",
+            "div.penci-single-link-pages",
+            "i.penci-post-countview-number-check",
+            "figure.wp-block-image",
+            "div.wp-block-image",
+            "hr.wp-block-separator",
+            "img",
+        ]
+        for sel in list(strip_selectors) + quipper_noise:
+            if not sel:
+                continue
+            try:
+                for el in wrapper.select(sel):
+                    el.decompose()
+            except Exception:
+                pass
+
+        clean_content: list[str] = []
+
+        # Iterate & Format
+        try:
+            for element in wrapper.find_all(["h2", "h3", "p", "ol", "ul"]):
+                text = element.get_text(separator=" ", strip=True)
+                if not text:
+                    continue
+
+                if element.name == "h2":
+                    clean_content.append(f"## {text}")
+                elif element.name == "h3":
+                    clean_content.append(f"### {text}")
+                elif element.name == "ol":
+                    for i, li in enumerate(element.find_all("li"), start=1):
+                        li_text = li.get_text(strip=True)
+                        if li_text:
+                            clean_content.append(f"{i}. {li_text}")
+                elif element.name == "ul":
+                    for li in element.find_all("li"):
+                        li_text = li.get_text(strip=True)
+                        if li_text:
+                            clean_content.append(f"- {li_text}")
+                elif element.name == "p":
+                    clean_content.append(text)
+        except Exception:
+            pass
+
+        return "\n\n".join(clean_content).strip()
+
+    def _extract_zenius(self, soup, strip_selectors: list[str]) -> str:
+        """Custom extraction for zenius.net/blog articles.
+
+        Strategy (from zara_adjust_1.md):
+        1. Parse JSON-LD for metadata (headline, description, etc.)
+        2. Locate section.gh-content
+        3. Pre-clean: destroy UI cards, comments, scripts
+        4. Math Handling: Convert img with alt to [Formula: ...]
+        5. Semantic formatting (h2, h3, blockquote, lists, etc.)
+        """
+        if soup is None or BeautifulSoup is None:
+            return ""
+
+        # Phase 1: Metadata extraction from JSON-LD (handled by caller if needed,
+        # but we can try to extract headline as title fallback here)
+        # Note: the engine currently handles title via separate selector,
+        # but we can improve it here.
+
+        wrapper = soup.select_one("section.gh-content")
+        if not wrapper:
+            return ""
+
+        # Pre-clean
+        zenius_noise = [
+            "div.kg-button-card",
+            "figure.kg-image-card",
+            "div.gh-comments",
+            "script",
+            "hr",
+            "div.ez-toc-container",
+            "div#toc_container",
+        ]
+        for sel in list(strip_selectors) + zenius_noise:
+            if not sel:
+                continue
+            try:
+                for el in wrapper.select(sel):
+                    el.decompose()
+            except Exception:
+                pass
+
+        clean_content: list[str] = []
+
+        # Iterate & Format
+        try:
+            for element in wrapper.find_all(
+                ["h2", "h3", "p", "ol", "ul", "blockquote", "div"]
+            ):
+                # Math Image Handling
+                for img in element.find_all("img"):
+                    alt_text = img.get("alt", "")
+                    if alt_text:
+                        img.replace_with(f" [Formula: {alt_text}] ")
+                    else:
+                        img.decompose()
+
+                # Ghost UI Handling (kg-callout-card)
+                if element.name == "div":
+                    if "kg-callout-card" in element.get("class", []):
+                        text = element.get_text(separator="\n", strip=True)
+                    else:
+                        continue
+                else:
+                    text = element.get_text(separator=" ", strip=True)
+
+                if not text:
+                    continue
+
+                lower_text = text.lower()
+                if (
+                    "baca juga:" in lower_text
+                    or "🔗" in text
+                    or "download aplikasi zenius" in lower_text
+                ):
+                    continue
+
+                # Markdown Formatting
+                if element.name == "h2":
+                    clean_content.append(f"## {text}")
+                elif element.name == "h3":
+                    clean_content.append(f"### {text}")
+                elif element.name == "blockquote":
+                    clean_content.append(f"> {text}")
+                elif element.name == "ol":
+                    for i, li in enumerate(element.find_all("li"), start=1):
+                        li_text = li.get_text(strip=True)
+                        if li_text:
+                            clean_content.append(f"{i}. {li_text}")
+                elif element.name == "ul":
+                    for li in element.find_all("li"):
+                        li_text = li.get_text(strip=True)
+                        if li_text:
+                            clean_content.append(f"- {li_text}")
+                elif element.name in ["p", "div"]:
+                    clean_content.append(text)
+        except Exception:
+            pass
+
+        return "\n\n".join(clean_content).strip()
+
+    # ------------------------------------------------------------------
     # Browser & run config builders
     # ------------------------------------------------------------------
 
@@ -1556,6 +2047,71 @@ class CrawlEngine:
                                         extraction_source = f"{extraction_source}+pagination:{pagination_pages}"
                                 except Exception:
                                     pass
+
+                    # Custom domain extraction methods (zara_adjust.md)
+                    # These elif branches ONLY fire for new domain methods;
+                    # the existing css/"" path above is untouched.
+                    if not content and method == "custom_detik" and soup is not None:
+                        try:
+                            content = self._extract_detik(soup, strip_selectors)
+                            if content:
+                                extraction_source = "custom_detik"
+                                selector_used = "custom_detik"
+                        except Exception:
+                            pass
+
+                    if not content and method == "custom_ruangguru" and soup is not None:
+                        try:
+                            content = self._extract_ruangguru(soup, strip_selectors)
+                            if content:
+                                extraction_source = "custom_ruangguru"
+                                selector_used = "custom_ruangguru"
+                        except Exception:
+                            pass
+
+                    if not content and method == "custom_liputan6" and soup is not None:
+                        try:
+                            content = self._extract_liputan6(soup, strip_selectors)
+                            if content:
+                                extraction_source = "custom_liputan6"
+                                selector_used = "custom_liputan6"
+                        except Exception:
+                            pass
+
+                    # BATCH 2 Dispatch (zara_adjust_1.md)
+                    if not content and method == "custom_republika" and soup is not None:
+                        try:
+                            content = self._extract_republika(soup, strip_selectors)
+                            if content:
+                                extraction_source = "custom_republika"
+                                selector_used = "custom_republika"
+                        except Exception:
+                            pass
+
+                    if not content and method == "custom_quipper" and soup is not None:
+                        try:
+                            content = self._extract_quipper(soup, strip_selectors)
+                            if content:
+                                extraction_source = "custom_quipper"
+                                selector_used = "custom_quipper"
+                        except Exception:
+                            pass
+
+                    if not content and method == "custom_zenius" and soup is not None:
+                        try:
+                            # Note: zenius extraction returns a dict with metadata + content
+                            # but we currently only store 'content' in the main flow.
+                            # We'll extract content for now to maintain compatibility.
+                            doc = self._extract_zenius(soup, strip_selectors)
+                            if isinstance(doc, dict):
+                                content = doc.get("content", "")
+                            else:
+                                content = doc
+                            if content:
+                                extraction_source = "custom_zenius"
+                                selector_used = "custom_zenius"
+                        except Exception:
+                            pass
 
                     # Heuristic CSS selector fallback (persisted selector + generic list)
                     if not content and html:

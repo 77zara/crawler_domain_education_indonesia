@@ -85,6 +85,89 @@ def is_kompas_article_url(url: str) -> bool:
         return False
     return "/read/" in (p.path or "").lower()
 
+
+def is_detik_article_url(url: str) -> bool:
+    """Check if URL is a Detik.com /edu/ article page."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not (p.scheme and p.netloc):
+        return False
+    if not p.netloc.lower().endswith("detik.com"):
+        return False
+    path = (p.path or "").lower()
+    return "/edu/" in path and "/d-" in path
+
+
+def is_liputan6_article_url(url: str) -> bool:
+    """Check if URL is a Liputan6.com /read/ article page."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not (p.scheme and p.netloc):
+        return False
+    if not p.netloc.lower().endswith("liputan6.com"):
+        return False
+    return "/read/" in (p.path or "").lower()
+
+
+def is_ruangguru_blog_url(url: str) -> bool:
+    """Check if URL is a Ruangguru.com /blog/ article page."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not (p.scheme and p.netloc):
+        return False
+    if not p.netloc.lower().endswith("ruangguru.com"):
+        return False
+    path = (p.path or "").lower()
+    # /blog/ must have a slug after it (not just /blog/ index)
+    return path.startswith("/blog/") and len(path) > len("/blog/")
+
+
+def is_republika_article_url(url: str) -> bool:
+    """Check if URL is a Republika.co.id article page."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not (p.scheme and p.netloc):
+        return False
+    if not p.netloc.lower().endswith("republika.co.id"):
+        return False
+    return "/berita/" in (p.path or "").lower()
+
+
+def is_quipper_blog_url(url: str) -> bool:
+    """Check if URL is a Quipper.com /blog/ article page."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not (p.scheme and p.netloc):
+        return False
+    if not p.netloc.lower().endswith("quipper.com"):
+        return False
+    path = (p.path or "").lower()
+    return "/blog/" in path and len(path) > len("/blog/")
+
+
+def is_zenius_blog_url(url: str) -> bool:
+    """Check if URL is a Zenius.net /blog/ article page."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not (p.scheme and p.netloc):
+        return False
+    if not p.netloc.lower().endswith("zenius.net"):
+        return False
+    path = (p.path or "").lower()
+    return "/blog/" in path and len(path) > len("/blog/")
+
 # Headers ringan untuk mengurangi blokir/403 dari search engines.
 _DEFAULT_SEARCH_HEADERS: dict[str, str] = {
     "User-Agent": (
@@ -319,6 +402,21 @@ PRIORITY_DOMAINS: set[str] = {
     "repository.ui.ac.id",
     "repository.ugm.ac.id",
     "repository.itb.ac.id",
+    # New domains (zara_adjust.md)
+    "www.detik.com",
+    "detik.com",
+    "www.ruangguru.com",
+    "ruangguru.com",
+    "www.liputan6.com",
+    "liputan6.com",
+    # New domains (zara_adjust_1.md)
+    "www.republika.co.id",
+    "republika.co.id",
+    "news.republika.co.id",
+    "www.quipper.com",
+    "quipper.com",
+    "www.zenius.net",
+    "zenius.net",
 }
 
 # Domain yang TIDAK boleh di-crawl (search engine, sosmed, e-commerce, berita asing)
@@ -817,6 +915,19 @@ class DiscoveryEngine:
         # Focused Kompas mode: prefer tag pages over external search engines
         if self.only_domain and self.only_domain.endswith("kompas.com"):
             search_urls = self._get_kompas_tag_urls()
+        # Focused mode for new domains: use search engine queries with site: operator
+        elif self.only_domain and (
+            self.only_domain.endswith("detik.com")
+            or self.only_domain.endswith("ruangguru.com")
+            or self.only_domain.endswith("liputan6.com")
+            or self.only_domain.endswith("republika.co.id")
+            or self.only_domain.endswith("quipper.com")
+            or self.only_domain.endswith("zenius.net")
+        ):
+            for query in self._get_queries():
+                for page in range(self.max_pages_per_query):
+                    search_urls.append((build_duckduckgo_url(query, page), "duckduckgo"))
+                    search_urls.append((build_bing_url(query, page), "bing"))
         else:
             for query in self._get_queries():
                 for page in range(self.max_pages_per_query):

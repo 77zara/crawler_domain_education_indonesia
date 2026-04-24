@@ -25,3 +25,135 @@ kompas.com:
   # Allow-list for URL discovery (high-signal article pages)
   allow:
     - "/read/"
+
+# ---------------------------------------------------------------------------
+# NEW DOMAINS — custom extraction strategies (zara_adjust.md)
+# ---------------------------------------------------------------------------
+
+detik.com:
+  method: "custom_detik"
+  selectors:
+    title: "h1.detail__title, h1"
+    body: "div.detail__body-text.itp_bodycontent"
+    body_children: "div.detail__body-text.itp_bodycontent > p"
+    dateline_strong: "div.detail__body-text.itp_bodycontent > p:first-of-type > strong:first-child"
+    list_items: "div.detail__body-text.itp_bodycontent > ul > li, div.detail__body-text.itp_bodycontent > ol > li"
+  strip:
+    - "script"
+    - "style"
+    - "nav"
+    - "footer"
+    - "header"
+    - "aside"
+    - "noscript"
+    - "form"
+    - ".clearfix"
+    - "table.linksisip"
+    - "div.sisip_artikel"
+    - "div.video-20detik"
+    - "div.embed-video"
+  sitemaps:
+    - "https://www.detik.com/sitemap.xml"
+  allow:
+    - "/edu/"
+
+ruangguru.com:
+  method: "custom_ruangguru"
+  selectors:
+    title: "h1"
+    body: "div.content-body"
+  strip:
+    - "script"
+    - "style"
+    - "nav"
+    - "footer"
+    - "header"
+    - "aside"
+    - "noscript"
+    - "form"
+  sitemaps:
+    - "https://www.ruangguru.com/sitemap.xml"
+  allow:
+    - "/blog/"
+
+liputan6.com:
+  method: "custom_liputan6"
+  selectors:
+    title: "h1.read-page--header--title, h1"
+    body: "div.article-content-body__item-content"
+  strip:
+    - "script"
+    - "style"
+    - "nav"
+    - "footer"
+    - "header"
+    - "aside"
+    - "noscript"
+    - "form"
+    - "div.baca-juga-collections"
+    - "div.advertisement-placeholder"
+    - "div.article-ad"
+    - "[id*='gpt-ad']"
+    - "[id*='revive-ad']"
+    - "div.tags--snippet"
+    - "div#preco"
+  sitemaps:
+    - "https://www.liputan6.com/sitemap.xml"
+  allow:
+    - "/read/"
+
+# ---------------------------------------------------------------------------
+# BATCH 2 — Additional domains (zara_adjust_1.md)
+# ---------------------------------------------------------------------------
+
+republika.co.id:
+  method: "custom_republika"
+  selectors:
+    title: "h1"
+    body: "div.article-content"
+  strip:
+    - "script"
+    - "[id*='div-gpt-ad']"
+    - "div.baca-juga"
+    - "div.terkait"
+  sitemaps:
+    - "https://www.republika.co.id/sitemap.xml"
+  allow:
+    - "/berita/"
+
+quipper.com:
+  method: "custom_quipper"
+  selectors:
+    title: "h1"
+    body: "div#penci-post-entry-inner"
+  strip:
+    - "div.lwptoc"
+    - "div.post-tags"
+    - "div.penci-single-link-pages"
+    - "i.penci-post-countview-number-check"
+    - "figure.wp-block-image"
+    - "div.wp-block-image"
+    - "hr.wp-block-separator"
+    - "img"
+  sitemaps:
+    - "https://www.quipper.com/id/blog/sitemap_index.xml"
+  allow:
+    - "/blog/"
+
+zenius.net:
+  method: "custom_zenius"
+  selectors:
+    title: "h1"
+    body: "section.gh-content"
+  strip:
+    - "div.kg-button-card"
+    - "figure.kg-image-card"
+    - "div.gh-comments"
+    - "script"
+    - "hr"
+    - "div.ez-toc-container"
+    - "div#toc_container"
+  sitemaps:
+    - "https://www.zenius.net/blog/sitemap.xml"
+  allow:
+    - "/blog/"
