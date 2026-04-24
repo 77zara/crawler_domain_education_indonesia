@@ -54,13 +54,35 @@ class Settings(BaseSettings):
 
     # Search engine discovery
     SEARCH_DELAY: float = 3.0  # detik antar search query (rate limiting)
-    MIN_RELEVANCE_SCORE: int = 2  # minimal keyword match untuk simpan konten
+    MIN_RELEVANCE_SCORE: int = 1  # minimal keyword match untuk simpan konten
+
+    # Discovery sources (PRD v2.0)
+    DISCOVERY_ENABLE_SITEMAP: bool = True
+    DISCOVERY_ENABLE_SEARCH: bool = True
+    SITES_YAML_PATH: str = "sites.yaml"
+    KEYWORDS_FILE: str = "keywords.txt"
+
+    # Sitemap watch mode
+    SITEMAP_RESCAN_HOURS: float = 6.0
+    SITEMAP_MAX_SITEMAPS: int = 200
+    SITEMAP_MAX_PAGES_PER_CYCLE: int = 5000
+
+    # Politeness: jitter between requests
+    REQUEST_DELAY_MIN: float = 2.0
+    REQUEST_DELAY_MAX: float = 5.0
+
+    # Retries (error -> retry with exponential backoff)
+    RETRY_MAX_ATTEMPTS: int = 3
+    RETRY_BASE_SECONDS: float = 10.0
+
+    # Pagination
+    MAX_PAGINATION_PAGES: int = 5
 
     # Lebih selektif untuk STEM/humaniora: gunakan frasa (>= 2 kata)
-    MIN_PHRASE_RELEVANCE_SCORE: int = 2
+    MIN_PHRASE_RELEVANCE_SCORE: int = 1
 
     # Extraction quality gate (0..1)
-    MIN_EXTRACTION_QUALITY: float = 0.80
+    MIN_EXTRACTION_QUALITY: float = 0.70
 
     # Fuzzy science relevance (RapidFuzz, optional)
     FUZZY_SCIENCE_THRESHOLD: int = 80  # 0..100, semakin tinggi semakin presisi
@@ -74,6 +96,10 @@ class Settings(BaseSettings):
     # Default: 1 shard (tidak di-shard)
     DISCOVERY_SHARD_INDEX: int = 0
     DISCOVERY_SHARD_COUNT: int = 1
+
+    # Optional domain whitelist: if non-empty, only URLs whose netloc endswith
+    # one of these values will be enqueued. Useful for focused crawling.
+    DOMAIN_WHITELIST: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +200,7 @@ TARGET_KEYWORDS: list[str] = [
 # ---------------------------------------------------------------------------
 # Minimum Relevance — konten harus mengandung minimal N keyword untuk disimpan
 # ---------------------------------------------------------------------------
-MIN_RELEVANCE_KEYWORDS: int = 7
+MIN_RELEVANCE_KEYWORDS: int = 5
 
 # ---------------------------------------------------------------------------
 # Indonesian science + humaniora vocabulary (untuk fuzzy relevance)

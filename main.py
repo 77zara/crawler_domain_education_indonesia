@@ -72,6 +72,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Override INSTANCE_ID (untuk multi-worker di server).",
     )
+    parser.add_argument(
+        "--only-domain",
+        type=str,
+        default=None,
+        help="Limit crawl to a single domain (e.g. kompas.com).",
+    )
+    parser.add_argument(
+        "--seed-url",
+        type=str,
+        default=None,
+        help="Seed URL to enqueue at start (useful when only-domain set).",
+    )
 
     # Test-only limits
     parser.add_argument(
@@ -98,6 +110,10 @@ async def main(args: argparse.Namespace) -> None:
 
     # Load settings (.env)
     settings = Settings()
+
+    # Apply domain restriction if provided via CLI
+    if getattr(args, "only_domain", None):
+        settings.DOMAIN_WHITELIST = [args.only_domain]
 
     # Apply CLI overrides
     if args.restart:
@@ -145,7 +161,7 @@ async def main(args: argparse.Namespace) -> None:
 
     logger.info("=" * 60)
     logger.info("AITF SR-02 Crawler — Tim 2 Sekolah Rakyat")
-    logger.info("Mode: Endless Search Engine Crawler")
+    logger.info("Mode: PRD v2.0 (SQLite + Sitemap + Search)")
     logger.info("=" * 60)
     logger.info("Instance ID   : %s", safe_instance_id or "(default)")
     logger.info(
@@ -161,6 +177,27 @@ async def main(args: argparse.Namespace) -> None:
     logger.info("=" * 60)
 
     engine = CrawlEngine(settings, stop_event)
+
+    # Seed initial URL if provided
+    if getattr(args, "seed_url", None):
+        try:
+            await engine._try_enqueue(args.seed_url)
+        except Exception:
+            pass
+    else:
+        # If focused on kompas.com, seed common listing/search pages to bootstrap discovery
+        if getattr(args, "only_domain", None) and args.only_domain.lower().endswith("kompas.com"):
+            seeds = [
+                "https://www.kompas.com/edu",
+                "https://www.kompas.com/edu/",
+                "https://edukasi.kompas.com/",
+                "https://www.kompas.com/",
+            ]
+            for s in seeds:
+                try:
+                    await engine._try_enqueue(s)
+                except Exception:
+                    pass
 
     # Handle SIGINT/SIGTERM untuk graceful shutdown
     loop = asyncio.get_running_loop()

@@ -10,6 +10,7 @@ Commands:
 
 from __future__ import annotations
 
+import html
 import asyncio
 import logging
 from pathlib import Path
@@ -81,7 +82,7 @@ class TelegramController:
 
         await update.message.reply_text(
             f"🚀 <b>Endless Crawling dimulai!</b>\n"
-            f"   Mode: Search Engine Discovery + Spidering\n"
+            f"   Mode: <b>PRD v2.0</b> (Sitemap + Search + Spidering)\n"
             f"   Workers: <b>{self.settings.MAX_CONCURRENCY}</b>\n"
             f"   Search delay: <b>{self.settings.SEARCH_DELAY}s</b>\n"
             f"   Output (data/raw):\n"
@@ -152,6 +153,7 @@ class TelegramController:
         )
 
         stats = self.engine.stats
+        counts = await self.engine.get_job_counts()
         status_text = (
             f"📊 <b>Status Crawler</b>\n"
             f"{'─' * 28}\n"
@@ -165,8 +167,13 @@ class TelegramController:
             f"⏭ Skipped       : <b>{stats.urls_skipped}</b>\n"
             f"🔗 Links found   : <b>{stats.links_extracted}</b>\n"
             f"🧮 Tokens (Qwen) : <b>{getattr(stats, 'tokens_total', 0)}</b>\n"
-            f"📋 Queue size    : <b>{self.engine.url_queue.qsize()}</b>\n"
-            f"🗃 Visited total : <b>{len(self.engine.visited)}</b>\n"
+            f"🗃 Jobs total    : <b>{counts.get('total', 0)}</b>\n"
+            f"   • pending_ready: <b>{counts.get('pending_ready', 0)}</b>\n"
+            f"   • pending     : <b>{counts.get('pending', 0)}</b>\n"
+            f"   • processing  : <b>{counts.get('processing', 0)}</b>\n"
+            f"   • completed   : <b>{counts.get('completed', 0)}</b>\n"
+            f"   • failed      : <b>{counts.get('failed', 0)}</b>\n"
+            f"   • ignored     : <b>{counts.get('ignored', 0)}</b>\n"
             f"📁 Records saved : <b>{total_lines}</b>\n"
             f"💾 File size     : <b>{file_size_mb:.2f} MB</b>\n"
             f"🧠 RAM usage     : <b>{ram_mb:.1f} MB</b>\n"
@@ -178,8 +185,8 @@ class TelegramController:
         help_text = (
             "🤖 <b>AITF SR-02 Crawler Bot</b>\n"
             "Tim 2 — Sekolah Rakyat\n\n"
-            "<b>Mode:</b> Endless Search Engine Crawler\n"
-            "Bot akan mencari URL via DuckDuckGo & Bing,\n"
+            "<b>Mode:</b> PRD v2.0 (SQLite + Sitemap + Search)\n"
+            "Bot akan men-scan sitemap dan/atau search engine,\n"
             "lalu crawl konten + spidering link secara terus-menerus.\n\n"
             "/run    — Mulai endless crawling\n"
             "/stop   — Graceful shutdown\n"
@@ -227,7 +234,7 @@ class TelegramController:
         if self.settings.TELEGRAM_CHAT_ID:
             await self._send_message(
                 "🟢 <b>Bot AITF SR-02 Crawler online!</b>\n"
-                "Mode: Endless Search Engine Crawler\n"
+                "Mode: PRD v2.0 (SQLite + Sitemap + Search)\n"
                 "Ketik /help untuk melihat daftar perintah."
             )
 

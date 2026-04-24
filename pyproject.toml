@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Tim 2 Sekolah Rakyat (AITF 2026) - Educational Crawler for CPT Dataset. Mengumpulkan konten kurikulum nasional Indonesia untuk Continued Pre-training."
 requires-python = ">=3.10, <3.14"
 dependencies = [
-    "crawl4ai>=0.8.0",
+    # crawl4ai removed; using aiohttp + trafilatura extraction instead
     "python-telegram-bot>=21.0",
     "pydantic-settings>=2.0",
     "aiohttp>=3.9",

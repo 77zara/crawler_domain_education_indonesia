@@ -24,13 +24,7 @@ try:
 except Exception:  # pragma: no cover
     BeautifulSoup = None
 
-try:
-    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
-except Exception:  # pragma: no cover
-    AsyncWebCrawler = None
-    BrowserConfig = None
-    CrawlerRunConfig = None
-    CacheMode = None
+import aiohttp
 
 try:
     from trafilatura import extract as trafilatura_extract
@@ -49,48 +43,10 @@ class CleanDataCrawler:
     def __init__(self):
         self.settings = Settings()
 
-        if AsyncWebCrawler is None or BrowserConfig is None or CrawlerRunConfig is None:
-            raise RuntimeError(
-                "crawl4ai belum ter-install di environment ini. Jalankan: pip install -r requirements.txt"
-            )
         if BeautifulSoup is None:
             raise RuntimeError(
                 "beautifulsoup4 belum ter-install di environment ini. Jalankan: pip install -r requirements.txt"
             )
-
-        # Konfigurasi Browser (Headless, User Agent realistis)
-        self.browser_config = BrowserConfig(
-            headless=self.settings.HEADLESS,
-            verbose=True,
-            # Tambahkan args jika perlu bypass deteksi bot sederhana
-            extra_args=["--disable-blink-features=AutomationControlled"],
-        )
-
-        # Optional: if Crawl4AI provides RsTrafilaturaStrategy in this version
-        extraction_strategy = None
-        try:
-            from crawl4ai.extraction_strategy import RsTrafilaturaStrategy
-
-            strategy = RsTrafilaturaStrategy()
-            if hasattr(strategy, "output_markdown"):
-                setattr(strategy, "output_markdown", True)
-            if hasattr(strategy, "favor_precision"):
-                setattr(strategy, "favor_precision", True)
-            extraction_strategy = strategy
-        except Exception:
-            extraction_strategy = None
-
-        # Konfigurasi Crawling
-        self.crawler_config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,
-            page_timeout=self.settings.PAGE_TIMEOUT,
-            extraction_strategy=extraction_strategy,
-            # Wait for CSS selector umum untuk konten utama (bisa disesuaikan per situs)
-            wait_for="article, main, .content, body",
-            delay_before_return_html=2.0,  # Beri waktu 2 detik setelah load untuk JS render
-            exclude_external_links=True,
-            process_iframes=False,  # Seringkali iframe adalah iklan
-        )
 
     def clean_html(self, html: str) -> str:
         """
@@ -178,65 +134,33 @@ class CleanDataCrawler:
     async def crawl_and_process(self, url: str):
         print(f"🕷️  Mulai crawling: {url}")
 
-        async with AsyncWebCrawler(config=self.browser_config) as crawler:
-            result = await crawler.arun(url=url, config=self.crawler_config)
 
-            if not result.success:
-                print(f"❌ Gagal crawling {url}: {result.error_message}")
-                return None
+        # Simple aiohttp fetch + Trafilatura extraction
+        print(f"🕷️  Mulai crawling (http fetch): {url}")
+        timeout = aiohttp.ClientTimeout(total=max(10, int(self.settings.PAGE_TIMEOUT / 1000)))
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status >= 400:
+                        print(f"❌ Gagal fetch {url}: HTTP {resp.status}")
+                        return None
+                    html = await resp.text()
 
-            title = result.metadata.get("title", "") if result.metadata else ""
+            title = ""
+            try:
+                if BeautifulSoup is not None and html:
+                    try:
+                        soup = BeautifulSoup(html, "lxml")
+                    except Exception:
+                        soup = BeautifulSoup(html, "html.parser")
+                    t = soup.title.string if soup.title and soup.title.string else ""
+                    title = (t or "").strip()
+            except Exception:
+                title = ""
 
-            # Prefer extraction_strategy output if present
-            content_md = ""
-            extraction_quality = None
-
-            extracted_payload = getattr(result, "extracted_content", None)
-            if isinstance(extracted_payload, str) and extracted_payload.strip():
-                try:
-                    data = json.loads(extracted_payload)
-                    item = None
-                    if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
-                        item = max(
-                            data,
-                            key=lambda x: float(x.get("extraction_quality", 0.0) or 0.0),
-                        )
-                    elif isinstance(data, dict):
-                        item = data
-
-                    if isinstance(item, dict):
-                        q = item.get("extraction_quality")
-                        if isinstance(q, (int, float)):
-                            extraction_quality = float(q)
-
-                        raw = (
-                            item.get("content_markdown")
-                            or item.get("markdown")
-                            or item.get("main_content")
-                            or item.get("content")
-                            or ""
-                        )
-                        if isinstance(raw, str):
-                            content_md = raw.strip()
-                except Exception:
-                    content_md = ""
-
-            # Trafilatura fallback
-            if not content_md:
-                cleaned_html = self.clean_html(result.html or "")
-                content_md = self.extract_main_content(cleaned_html, url)
-
-            # Crawl4AI markdown fallback
-            if not content_md:
-                md = getattr(result, "markdown", None)
-                if isinstance(md, str):
-                    content_md = md.strip()
-                elif md is not None:
-                    content_md = (
-                        getattr(md, "fit_markdown", None)
-                        or getattr(md, "raw_markdown", "")
-                        or ""
-                    ).strip()
+            # Trafilatura extraction
+            cleaned_html = self.clean_html(html or "")
+            content_md = self.extract_main_content(cleaned_html, url)
 
             content_md = clean_markdown(content_md)
 

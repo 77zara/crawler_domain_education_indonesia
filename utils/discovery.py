@@ -8,16 +8,93 @@ Juga mengekstrak link dari halaman yang sudah di-crawl (spidering).
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
+from pathlib import Path
 from urllib.parse import urlencode, urlparse, urljoin, parse_qs
 from typing import AsyncIterator
 
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+import aiohttp
+from aiohttp import ClientTimeout
 
 from config import TARGET_KEYWORDS
 
 logger = logging.getLogger(__name__)
+
+_RE_SITE_SUFFIX = re.compile(r"\(\s*site:[^)]+\)\s*$", re.IGNORECASE)
+
+
+def _repo_root() -> Path:
+    # utils/ -> repo root
+    return Path(__file__).resolve().parents[1]
+
+
+def load_keyword_phrases_from_file(path: Path) -> list[str]:
+    """Load keyword phrases from a simple text file.
+
+    Supports lines like: `Kurikulum Merdeka(site:www.kompas.com)`.
+    We strip the trailing `(site:...)` part and keep only the phrase.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    phrases: list[str] = []
+    for line in raw.splitlines():
+        s = (line or "").strip()
+        if not s or s.startswith("#"):
+            continue
+
+        # Strip trailing (site:...) suffix
+        s = _RE_SITE_SUFFIX.sub("", s).strip()
+
+        # If written as: "foo site:bar" strip site part
+        if "site:" in s.lower():
+            s = re.split(r"\bsite:\S+", s, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+
+        s = re.sub(r"\s+", " ", s).strip()
+        if s:
+            phrases.append(s)
+
+    # Deduplicate preserve order
+    return list(dict.fromkeys(phrases))
+
+
+def kompas_tag_slug(phrase: str) -> str:
+    """Slugify phrase into Kompas tag path component."""
+    s = (phrase or "").strip().lower()
+    if not s:
+        return ""
+
+    # Keep letters/numbers, convert others to '-'
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s[:80]
+
+
+def is_kompas_article_url(url: str) -> bool:
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if not (p.scheme and p.netloc):
+        return False
+    if not p.netloc.lower().endswith("kompas.com"):
+        return False
+    return "/read/" in (p.path or "").lower()
+
+# Headers ringan untuk mengurangi blokir/403 dari search engines.
+_DEFAULT_SEARCH_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0 Safari/537.36"
+    ),
+    "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 # ---------------------------------------------------------------------------
 # Search query generator
@@ -536,10 +613,67 @@ def extract_urls_from_bing(html: str) -> list[str]:
     # Simpler: grab all <cite> or <a href="http..."> that are not bing.com
     href_pattern = re.compile(r'<a\s+href="(https?://[^"]+)"', re.IGNORECASE)
 
+    def _decode_bing_redirect(href: str) -> str | None:
+        """Decode Bing redirect URLs (ck/a) into the real target URL.
+
+        Bing sering menyimpan URL target dalam query param `u` (base64-like),
+        misal: u=a1aHR0cHM6Ly93d3cu...
+        """
+        try:
+            parsed = urlparse(href)
+            host = (parsed.netloc or "").lower()
+            if "bing.com" not in host:
+                return None
+
+            qs = parse_qs(parsed.query)
+
+            # Common: u=<encoded>
+            u = (qs.get("u") or [""])[0]
+            u = (u or "").strip()
+            if not u:
+                # Sometimes: url=<encoded>
+                u = (qs.get("url") or [""])[0]
+                u = (u or "").strip()
+            if not u:
+                return None
+
+            # Query values may be percent-encoded
+            try:
+                from urllib.parse import unquote
+
+                u = unquote(u)
+            except Exception:
+                pass
+
+            # Some redirects store plain URL
+            if u.startswith("http://") or u.startswith("https://"):
+                return u
+
+            # Common format: a1<base64(url)>
+            if u.startswith("a1") and len(u) > 4:
+                b64 = u[2:]
+                pad = "=" * ((4 - (len(b64) % 4)) % 4)
+                try:
+                    raw = base64.urlsafe_b64decode((b64 + pad).encode("utf-8"))
+                except Exception:
+                    raw = base64.b64decode((b64 + pad).encode("utf-8"))
+                txt = raw.decode("utf-8", errors="ignore")
+                m = re.search(r"https?://[^\s\"'<>]+", txt)
+                if m:
+                    return m.group(0)
+                if txt.startswith("http://") or txt.startswith("https://"):
+                    return txt
+
+        except Exception:
+            return None
+
+        return None
+
     for match in href_pattern.finditer(html):
         href = match.group(1)
-        if is_valid_crawl_url(href):
-            urls.append(href)
+        real = _decode_bing_redirect(href) or href
+        if is_valid_crawl_url(real):
+            urls.append(real)
 
     return list(dict.fromkeys(urls))
 
@@ -577,6 +711,8 @@ class DiscoveryEngine:
         max_pages_per_query: int = 3,
         shard_index: int = 0,
         shard_count: int = 1,
+        only_domain: str | None = None,
+        keywords_file: str | None = None,
     ) -> None:
         self.max_pages_per_query = max_pages_per_query
         self.query_index: int = 0
@@ -586,6 +722,90 @@ class DiscoveryEngine:
         self.shard_count = max(1, int(shard_count))
         self.shard_index = int(shard_index) % self.shard_count
 
+        # If set, generate site: queries to focus discovery.
+        self.only_domain = self._normalize_domain(only_domain)
+
+        # Optional keyword phrases (used for Kompas tag discovery)
+        kw_path = None
+        if keywords_file:
+            try:
+                kw_path = Path(keywords_file)
+            except Exception:
+                kw_path = None
+        if kw_path is None:
+            kw_path = _repo_root() / "keywords.txt"
+        self.keyword_phrases: list[str] = []
+        if kw_path and kw_path.exists():
+            self.keyword_phrases = load_keyword_phrases_from_file(kw_path)
+
+    def _normalize_domain(self, domain: str | None) -> str | None:
+        raw = (domain or "").strip().lower()
+        if not raw:
+            return None
+        raw = raw.replace("https://", "").replace("http://", "")
+        raw = raw.split("/")[0]
+        return raw or None
+
+    def _build_site_queries(self, site_domain: str) -> list[str]:
+        """Generate queries seperti: 'materi sma <keyword> site:kompas.com'."""
+        site = self._normalize_domain(site_domain) or site_domain
+        site_part = f"site:{site}"
+
+        # Fokus pakai keyword berbasis frasa agar hasil lebih presisi
+        phrase_keywords = [kw for kw in TARGET_KEYWORDS if len((kw or "").split()) >= 2]
+        # Jika keyword list terlalu besar, cukup sebagian saja; sisanya akan tercakup di cycle berikutnya
+        # lewat sharding pada search_urls.
+
+        templates = [
+            f"materi sma {{kw}} {site_part}",
+            f"materi smp {{kw}} {site_part}",
+            f"materi sd {{kw}} {site_part}",
+            f"contoh soal {{kw}} {site_part}",
+            f"bank soal {{kw}} {site_part}",
+            f"kurikulum {{kw}} {site_part}",
+            f"asesmen {{kw}} {site_part}",
+        ]
+
+        queries: list[str] = []
+        for kw in phrase_keywords:
+            kw = (kw or "").strip()
+            if not kw:
+                continue
+            for tpl in templates:
+                queries.append(tpl.format(kw=kw))
+            queries.append(f"{kw} {site_part}")
+
+        # Deduplicate preserve order
+        queries = list(dict.fromkeys(queries))
+
+        # Safety cap: avoid exploding query count (still enough for endless crawling)
+        return queries[:400]
+
+    def _get_kompas_tag_urls(self) -> list[tuple[str, str]]:
+        """Generate Kompas tag pages from keyword phrases.
+
+        These pages list related articles; the discovery worker will fetch the
+        tag page and extract `/read/` links.
+        """
+        if not self.keyword_phrases:
+            return []
+
+        urls: list[tuple[str, str]] = []
+        for phrase in self.keyword_phrases:
+            slug = kompas_tag_slug(phrase)
+            if not slug:
+                continue
+            urls.append((f"https://www.kompas.com/tag/{slug}", "kompas_tag"))
+
+        # Deduplicate preserve order
+        urls = list(dict.fromkeys(urls))
+        return urls
+
+    def _get_queries(self) -> list[str]:
+        if self.only_domain:
+            return self._build_site_queries(self.only_domain)
+        return SEARCH_QUERIES
+
     def get_all_search_urls(self) -> list[tuple[str, str]]:
         """Generate semua search URL.
 
@@ -594,10 +814,14 @@ class DiscoveryEngine:
         """
         search_urls: list[tuple[str, str]] = []
 
-        for query in SEARCH_QUERIES:
-            for page in range(self.max_pages_per_query):
-                search_urls.append((build_duckduckgo_url(query, page), "duckduckgo"))
-                search_urls.append((build_bing_url(query, page), "bing"))
+        # Focused Kompas mode: prefer tag pages over external search engines
+        if self.only_domain and self.only_domain.endswith("kompas.com"):
+            search_urls = self._get_kompas_tag_urls()
+        else:
+            for query in self._get_queries():
+                for page in range(self.max_pages_per_query):
+                    search_urls.append((build_duckduckgo_url(query, page), "duckduckgo"))
+                    search_urls.append((build_bing_url(query, page), "bing"))
 
         if self.shard_count > 1:
             search_urls = [
@@ -623,32 +847,41 @@ class DiscoveryEngine:
         self.query_index += batch_size
         return batch
 
-    async def search_one(
-        self,
-        search_url: str,
-        engine: str,
-        crawler: AsyncWebCrawler,
-    ) -> list[str]:
-        """Jalankan satu search query dan kembalikan list URL yang ditemukan."""
+    async def search_one(self, search_url: str, engine: str) -> list[str]:
+        """Run one search query and return list of found URLs using HTTP fetch.
+
+        Previously this used Crawl4AI to fetch search result pages; now we use
+        a simple aiohttp GET and extract links from the HTML.
+        """
         try:
-            config = CrawlerRunConfig(
-                cache_mode=CacheMode.BYPASS,  # Selalu fresh dari search engine
-                word_count_threshold=0,
-                wait_until="domcontentloaded",
-                page_timeout=30000,
-                verbose=False,
-            )
-            result = await crawler.arun(url=search_url, config=config)
+            timeout = ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout, headers=_DEFAULT_SEARCH_HEADERS) as session:
+                async with session.get(search_url) as resp:
+                    if resp.status >= 400:
+                        logger.warning("Search fetch failed (%s): HTTP %d", engine, resp.status)
+                        return []
+                    body = await resp.text(errors="ignore")
 
-            if not result.success:
-                logger.warning("Search gagal (%s): %s", engine, result.error_message)
-                return []
-
-            html = result.html or ""
-            if engine == "duckduckgo":
-                found = extract_urls_from_duckduckgo(html)
+            if engine == "kompas_tag":
+                # Extract only Kompas article links from tag pages
+                links = extract_links_from_page(body, search_url)
+                found = [u for u in links if is_kompas_article_url(u) and is_valid_crawl_url(u)]
+                # Prioritize EDU/Skola section URLs first
+                try:
+                    found.sort(
+                        key=lambda u: 0
+                        if (
+                            u.startswith("https://www.kompas.com/edu/")
+                            or u.startswith("https://www.kompas.com/skola/")
+                        )
+                        else 1
+                    )
+                except Exception:
+                    pass
+            elif engine == "duckduckgo":
+                found = extract_urls_from_duckduckgo(body)
             elif engine == "bing":
-                found = extract_urls_from_bing(html)
+                found = extract_urls_from_bing(body)
             else:
                 found = []
 

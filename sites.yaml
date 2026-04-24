@@ -1,0 +1,27 @@
+# Strategy manifest (PRD v2.0)
+# Senior can update selectors/sitemaps here without changing crawler code.
+
+kompas.com:
+  method: "css"
+  selectors:
+    title: "h1.read__title, h1"
+    body: "div.read__content, article"
+    next_page: "a.paging__link--next"
+  strip:
+    - "script"
+    - "style"
+    - "nav"
+    - "footer"
+    - "header"
+    - "aside"
+    - "noscript"
+    - "form"
+    - ".ads"
+    - ".video-payload"
+  # Sitemap seeds (crawler will recurse sitemap_index/sitemap)
+  sitemaps:
+    - "https://www.kompas.com/sitemap.xml"
+    - "https://www.kompas.com/sitemap_index.xml"
+  # Allow-list for URL discovery (high-signal article pages)
+  allow:
+    - "/read/"
